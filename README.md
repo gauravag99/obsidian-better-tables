@@ -62,10 +62,14 @@ Markdown has no `colspan`/`rowspan`, so merged cells are stored in that same hid
 A cell holds Markdown text, so a picture pasted straight from the clipboard is written to your **attachment folder** (Obsidian's own attachment settings are respected) and inserted as an embed, e.g. `![[Pasted image 20261125201345.png]]`. That works for screenshots, images copied from another app, and files copied in the file manager.
 
 - Images copied from a web page are inserted as `![](https://…)`.
-- Inline `data:` images are saved as real files, so a huge data URL never ends up in your note.
+- Inline `data:` and `blob:` images are saved as real files, so a huge data URL never ends up in your note.
 - Embeds are limited to the column width, so the table layout stays intact.
 - Plain text, `[[links]]` and existing `![[embeds]]` paste exactly as before.
 - Dropping an image file onto a cell appends it the same way.
+
+Embeds are written **without display text or alt text** — `![[attachments/Pasted image ….png]]`, or `![](attachments/Pasted%20image….png)` if you use Markdown links. Themes and plugins that render alt text as a caption therefore have nothing to show, instead of labelling every picture with its file name.
+
+Images inside a cell behave like they do elsewhere in Obsidian: links, embeds and controls added by other plugins (image toolbars, converters, zoom buttons…) receive their own clicks, and right-clicking an image opens its native menu — with whatever other plugins add to it — instead of the table's menu. To select a cell that is completely covered by an image, click its border or reach it with the keyboard.
 
 ## Settings
 If you like to immediately select & edit text (bypassing having to select the cell first), you can turn on ````Quick text edit```` in the setting.

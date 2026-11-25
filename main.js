@@ -1025,18 +1025,18 @@ class TableWidget {
   async imageEmbedsFrom(files, srcs) {
     const lines = [];
     try {
-      for (const file of files.slice(0, 20)) lines.push(`!${await this.savePastedImage(file)}`);
+      for (const file of files.slice(0, 20)) lines.push(await this.savePastedImage(file));
       for (const src of srcs.slice(0, 20)) {
         if (/^data:/i.test(src)) {
           // Inline image data: store it as a real attachment, never inline the
           // whole data URL in the note.
           const data = dataUrlImage(src);
-          if (data) lines.push(`!${await this.saveImageBytes(data.bytes, data.type)}`);
+          if (data) lines.push(await this.saveImageBytes(data.bytes, data.type));
         } else if (/^blob:/i.test(src)) {
           // Some apps hand over a blob: URL for the copied picture.
           const res = await fetch(src);
           const type = res.headers.get("content-type") || "image/png";
-          lines.push(`!${await this.saveImageBytes(await res.arrayBuffer(), type)}`);
+          lines.push(await this.saveImageBytes(await res.arrayBuffer(), type));
         } else {
           lines.push(`![](${src})`);
         }
@@ -1086,7 +1086,54 @@ class TableWidget {
     const slash = path.lastIndexOf("/");
     if (slash > 0) await this.ensureFolder(path.slice(0, slash));
     const file = await app.vault.createBinary(path, bytes);
-    return this.nativeMarkdownLink(file);
+    return this.imageEmbedMarkdown(file);
+  }
+
+  /** Markdown for an image file with no alias or alt text. Obsidian's own
+   *  generateMarkdownLink adds a `|display name` alias when the file lives in a
+   *  folder, and themes/plugins that show alt text as a caption then label every
+   *  pasted picture with its file name. */
+  imageEmbedMarkdown(file) {
+    const app = this.plugin.app;
+    const path = file.path || file.name || "";
+    const markdownLinks =
+      typeof app.vault.getConfig === "function" && app.vault.getConfig("useMarkdownLinks");
+    if (markdownLinks) {
+      // encodeURIComponent per segment: spaces, #, ? and parentheses all break
+      // a markdown link otherwise.
+      const src = path
+        .split("/")
+        .map((seg) =>
+          encodeURIComponent(seg).replace(/\(/g, "%28").replace(/\)/g, "%29").replace(/!/g, "%21")
+        )
+        .join("/");
+      return `![](${src})`;
+    }
+    // Obsidian's own shortest-path resolver, but without the `|display name`
+    // alias generateMarkdownLink would add.
+    let linkPath = path;
+    const cache = app.metadataCache;
+    if (cache && typeof cache.fileToLinktext === "function") {
+      try {
+        linkPath = cache.fileToLinktext(file, this.ctx.sourcePath || "", false) || path;
+      } catch {
+        linkPath = path;
+      }
+    }
+    return `![[${linkPath}]]`;
+  }
+
+  /** Rendered content that owns its own pointer events and menus: images,
+   *  embeds, links (menu only) and controls injected by other plugins. Our cell
+   *  handlers step aside so those keep working. */
+  cellContentIsInteractive(target, td, includeLinks) {
+    if (!td || !target || target === td || !td.contains(target) || !target.closest) return false;
+    const selector =
+      "img, .internal-embed, .image-embed, canvas, video, audio, iframe, " +
+      "button, input, select, textarea, .clickable-icon, [role='button'], [contenteditable='true']" +
+      (includeLinks ? ", a" : "");
+    const el = target.closest(selector);
+    return !!el && el !== td;
   }
 
   /** Where to put an attachment: Obsidian's own resolver when available, so the
@@ -1205,6 +1252,16 @@ class TableWidget {
       // Already editing this cell: leave the event alone so native caret
       // placement and drag-to-select-text work.
       if (this.editingCell === td) return;
+      // Images, embeds and controls that another plugin (or Obsidian) put in
+      // the cell keep their own clicks — otherwise a toolbar button would be
+      // swallowed and turned into a cell selection.
+      if (this.cellContentIsInteractive(e.target, td)) {
+        // Drop our selection so our document-level key handler can't steal
+        // keystrokes meant for that control.
+        this.clearCellSelection();
+        this.clearLineSelection();
+        return;
+      }
       e.preventDefault();
       e.stopPropagation();
       // Editing a DIFFERENT cell: commit that edit first, then treat this press
@@ -1264,13 +1321,21 @@ class TableWidget {
     );
     // Right-click a cell → merge/split plus the column's text alignment
     // (markdown only supports per-column alignment, so that applies to the
-    // whole column).
+    // whole column). Rendered content — images, embeds, links, plugin controls —
+    // keeps its native menu, so other plugins can offer their own actions.
     td.addEventListener("contextmenu", (e) => {
       if (this.editingCell) {
         // A cell is being edited → Obsidian shows its native editor menu. Flag
         // the column so the editor-menu hook can append Align to that menu
         // (rather than us suppressing the native Cut/Copy/Paste).
         this.plugin.pendingAlign = { widget: this, col: c, at: Date.now() };
+        return;
+      }
+      if (this.cellContentIsInteractive(e.target, td, true)) {
+        // Native menu for the image/embed/plugin control; drop our cell
+        // selection so its keyboard shortcuts are not intercepted.
+        this.clearCellSelection();
+        this.clearLineSelection();
         return;
       }
       e.preventDefault();
