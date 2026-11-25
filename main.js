@@ -2,20 +2,59 @@
 
 const { Plugin, Notice, setIcon, Menu, PluginSettingTab, Setting, MarkdownRenderer, Component, MarkdownRenderChild } = require("obsidian");
 
+const TABLE_CELL_W = 140;
+const TABLE_CELL_H = 48;
+const MIN_W = 50;
+const MIN_H = 28;
+const MAX_LINK_SUGGESTIONS = 20;
+
 const DEFAULT_SETTINGS = {
   // false: click selects a cell, a second click (or Enter) edits it.
   // true:  a single click edits the cell immediately ("quick text edit").
   quickEdit: false,
   // Hand pasted images to the Image Converter plugin when it is installed, so
   // its conversion/naming/link presets apply to cell images too.
-  imageConverterPaste: true
-};
+  imageConverterPaste: true,
 
-const TABLE_CELL_W = 140;
-const TABLE_CELL_H = 48;
-const MIN_W = 50;
-const MIN_H = 28;
-const MAX_LINK_SUGGESTIONS = 20;
+  // --- editing behaviour ---
+  // Tab in the bottom-right cell / Enter on the bottom row grow the table.
+  tabAddsRow: true,
+  enterAddsRow: true,
+  // What happens to the text of the cells being merged: keep all of it, one
+  // line per cell, or keep only the top-left cell.
+  mergeContent: "join", // "join" | "first"
+
+  // --- table chrome ---
+  showInsertDots: true,
+  showAddButtons: true,
+  showReorderHandles: true,
+  showResizeDividers: true,
+  showDeleteTableButton: true,
+
+  // --- sizing ---
+  defaultColumnWidth: TABLE_CELL_W,
+  defaultRowHeight: TABLE_CELL_H,
+  minColumnWidth: MIN_W,
+  minRowHeight: MIN_H,
+
+  // --- clipboard & images ---
+  pasteBlock: true,
+  imageZoom: true,
+  imageZoomMin: 25,
+  imageZoomMax: 800,
+  imageZoomStep: 25,
+
+  // --- history & export ---
+  historyLimit: 50,
+  restoreSelection: true,
+  csvDelimiter: ",", // "," | ";" | "\t"
+  exportFolder: "", // empty = next to the note
+
+  // --- new tables (Insert table command) ---
+  newTableRows: 1,
+  newTableCols: 2,
+  newTableSticky: false
+};
 
 /** The metadata comment looks like
  *    <!-- tk:cols=140,140;rows=48,48;merge=0,0,1,2;sticky=1 -->
@@ -108,7 +147,7 @@ function dataUrlImage(src) {
 }
 
 /** Parse CSV text (RFC 4180 quoting, embedded newlines). */
-function parseCsvText(text) {
+function parseCsvText(text, delimiter = ",") {
   const rows = [];
   let row = [];
   let field = "";
@@ -129,7 +168,7 @@ function parseCsvText(text) {
       }
     } else if (ch === '"') {
       quoted = true;
-    } else if (ch === ",") {
+    } else if (ch === delimiter) {
       row.push(field);
       field = "";
     } else if (ch === "\n") {
@@ -149,7 +188,7 @@ function parseCsvText(text) {
 /** Turn clipboard text into a grid. Spreadsheets put TSV on the clipboard, so
  *  tabs win; a multi-line block that parses as a rectangular CSV is CSV;
  *  anything else is one cell (a paragraph keeps its line breaks). */
-function parseClipboardGrid(text) {
+function parseClipboardGrid(text, delimiter = ",") {
   const norm = String(text || "").replace(/\r\n?/g, "\n").replace(/\n+$/, "");
   if (!norm) return null;
   const lines = norm.split("\n");
@@ -157,7 +196,7 @@ function parseClipboardGrid(text) {
     return lines.map((line) => line.split("\t"));
   }
   if (lines.length > 1) {
-    const rows = parseCsvText(norm);
+    const rows = parseCsvText(norm, delimiter);
     const width = rows[0] ? rows[0].length : 0;
     if (width > 1 && rows.every((row) => row.length === width)) return rows;
   }
@@ -165,9 +204,10 @@ function parseClipboardGrid(text) {
 }
 
 /** One CSV field, quoted only when it has to be. */
-function csvField(value) {
+function csvField(value, delimiter = ",") {
   const text = String(value == null ? "" : value);
-  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  const special = text.includes(delimiter) || /["\n\r]/.test(text);
+  return special ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
 function sumArr(a) {
@@ -400,6 +440,27 @@ class TableWidget {
     return this.el.ownerDocument;
   }
 
+  numSetting(key, fallback, min) {
+    const raw = Number(this.plugin.settings[key]);
+    return Number.isFinite(raw) && raw >= min ? raw : fallback;
+  }
+
+  defaultW() {
+    return this.numSetting("defaultColumnWidth", TABLE_CELL_W, 20);
+  }
+
+  defaultH() {
+    return this.numSetting("defaultRowHeight", TABLE_CELL_H, 10);
+  }
+
+  minW() {
+    return this.numSetting("minColumnWidth", MIN_W, 10);
+  }
+
+  minH() {
+    return this.numSetting("minRowHeight", MIN_H, 10);
+  }
+
   /** Tear down everything this widget owns. Called when Obsidian unloads the
    *  block (re-render, view close, plugin unload) via the render child below. */
   destroy() {
@@ -444,10 +505,10 @@ class TableWidget {
     const stored = parseMeta(this.source);
     const pc = stored && stored.cols;
     const pr = stored && stored.rows;
-    this.colW = Array.isArray(pc) && pc.length === cols ? pc.map((n) => Math.max(MIN_W, n)) : [];
-    this.rowH = Array.isArray(pr) && pr.length === rows ? pr.map((n) => Math.max(MIN_H, n)) : [];
-    if (this.colW.length !== cols) this.colW = Array(cols).fill(TABLE_CELL_W);
-    if (this.rowH.length !== rows) this.rowH = Array(rows).fill(TABLE_CELL_H);
+    this.colW = Array.isArray(pc) && pc.length === cols ? pc.map((n) => Math.max(this.minW(), n)) : [];
+    this.rowH = Array.isArray(pr) && pr.length === rows ? pr.map((n) => Math.max(this.minH(), n)) : [];
+    if (this.colW.length !== cols) this.colW = Array(cols).fill(this.defaultW());
+    if (this.rowH.length !== rows) this.rowH = Array(rows).fill(this.defaultH());
   }
 
   loadAlign() {
@@ -539,7 +600,7 @@ class TableWidget {
     const lefts = [];
     let x = 0;
     for (let c = 0; c < cols; c++) {
-      const w = this.colW[c] || TABLE_CELL_W;
+      const w = this.colW[c] || this.defaultW();
       lefts[c] = x;
       widths[c] = w;
       x += w;
@@ -629,7 +690,7 @@ class TableWidget {
       e.preventDefault();
       this.flushEdit();
       this.cells.forEach((row) => row.push(""));
-      this.colW.push(TABLE_CELL_W);
+      this.colW.push(this.defaultW());
       this.colAlign.push(null);
       this.save();
     });
@@ -641,7 +702,7 @@ class TableWidget {
       e.preventDefault();
       this.flushEdit();
       this.cells.push(this.cells[0].map(() => ""));
-      this.rowH.push(TABLE_CELL_H);
+      this.rowH.push(this.defaultH());
       this.save();
     });
 
@@ -718,6 +779,10 @@ class TableWidget {
    *  re-rendered. Also re-arms the table's document key handler, so Ctrl+Z
    *  keeps working after an undo. */
   restorePendingSelection() {
+    if (this.plugin.settings.restoreSelection === false) {
+      this.plugin.pendingSelection = null;
+      return;
+    }
     const p = this.plugin.pendingSelection;
     if (!p || p.key !== this.historyKey()) return;
     this.plugin.pendingSelection = null;
@@ -805,12 +870,12 @@ class TableWidget {
       this.insertLineEl && this.insertLineEl.hide();
       if (axis === "col") {
         this.cells.forEach((row) => row.splice(boundary + 1, 0, ""));
-        this.colW.splice(boundary + 1, 0, TABLE_CELL_W);
+        this.colW.splice(boundary + 1, 0, this.defaultW());
         this.colAlign.splice(boundary + 1, 0, null);
         this.mergesAfterInsert("col", boundary + 1);
       } else {
         this.cells.splice(boundary + 1, 0, this.cells[0].map(() => ""));
-        this.rowH.splice(boundary + 1, 0, TABLE_CELL_H);
+        this.rowH.splice(boundary + 1, 0, this.defaultH());
         this.mergesAfterInsert("row", boundary + 1);
       }
       this.save();
@@ -844,11 +909,11 @@ class TableWidget {
     const t = this.tableEl;
     if (!t) return;
     t.querySelectorAll("col").forEach((c, i) => {
-      c.style.width = `${this.colW[i] || TABLE_CELL_W}px`;
+      c.style.width = `${this.colW[i] || this.defaultW()}px`;
     });
     t.style.width = `${sumArr(this.colW)}px`;
     Array.from(t.rows).forEach((tr, r) => {
-      tr.style.height = `${this.rowH[r] || TABLE_CELL_H}px`;
+      tr.style.height = `${this.rowH[r] || this.defaultH()}px`;
     });
   }
 
@@ -927,9 +992,9 @@ class TableWidget {
       const startSize = axis === "col" ? this.colW[index] : this.rowH[index];
       const onMove = (ev) => {
         if (axis === "col") {
-          this.colW[index] = Math.max(MIN_W, Math.round(startSize + (ev.clientX - startX)));
+          this.colW[index] = Math.max(this.minW(), Math.round(startSize + (ev.clientX - startX)));
         } else {
-          this.rowH[index] = Math.max(MIN_H, Math.round(startSize + (ev.clientY - startY)));
+          this.rowH[index] = Math.max(this.minH(), Math.round(startSize + (ev.clientY - startY)));
         }
         this.applySizes();
         this.layout();
@@ -973,11 +1038,15 @@ class TableWidget {
     if (rA === rB && cA === cB) return;
     this.flushEdit();
     const target = { r: rA, c: cA, rs: rB - rA + 1, cs: cB - cA + 1 };
+    const keepAll = this.plugin.settings.mergeContent !== "first";
+    const firstText = this.cells[rA][cA] || "";
     const parts = [];
-    for (let r = rA; r <= rB; r++) {
-      for (let c = cA; c <= cB; c++) {
-        const text = (this.cells[r][c] || "").trim();
-        if (text) parts.push(text);
+    if (keepAll) {
+      for (let r = rA; r <= rB; r++) {
+        for (let c = cA; c <= cB; c++) {
+          const text = (this.cells[r][c] || "").trim();
+          if (text) parts.push(text);
+        }
       }
     }
     // Overlapping merges are dissolved first; their text is part of `parts`.
@@ -985,7 +1054,7 @@ class TableWidget {
     for (let r = rA; r <= rB; r++) {
       for (let c = cA; c <= cB; c++) this.cells[r][c] = "";
     }
-    this.cells[rA][cA] = parts.join("\n");
+    this.cells[rA][cA] = keepAll ? parts.join("\n") : firstText;
     this.merges.push(target);
     this.sortMerges();
     this._pendingSelectionOverride = { r0: rA, c0: cA, r1: rA, c1: cA };
@@ -1430,6 +1499,7 @@ class TableWidget {
    *  embeds (the button is added inside the embed, so plugin CSS and their own
    *  overlays keep working) and for plain images, which get a small frame. */
   decorateCellImages(td) {
+    if (this.plugin.settings.imageZoom === false) return;
     if (!td || !td.isConnected) return;
     const images = Array.from(td.querySelectorAll(".cp-cell-markdown img"));
     for (const img of images) {
@@ -1495,6 +1565,7 @@ class TableWidget {
   /** Full-screen viewer for a cell image. Zoom and pan are temporary: the note
    *  and the cell's markdown are never touched. */
   openImageZoom(img, opener) {
+    if (this.plugin.settings.imageZoom === false) return;
     const src = img.currentSrc || img.getAttribute("src") || "";
     if (!src) return;
     this.closeImageZoom();
@@ -1524,8 +1595,10 @@ class TableWidget {
     bar.className = "bt-zoom-bar";
     overlay.appendChild(bar);
 
-    const MIN = 0.25;
-    const MAX = 8;
+    const cfg = this.plugin.settings;
+    const MIN = Math.max(0.05, Math.min(1, (Number(cfg.imageZoomMin) || 25) / 100));
+    const MAX = Math.max(MIN, Math.min(16, (Number(cfg.imageZoomMax) || 800) / 100));
+    const STEP = 1 + Math.max(1, Math.min(500, Number(cfg.imageZoomStep) || 25)) / 100;
     let scale = 1;
     let tx = 0;
     let ty = 0;
@@ -1592,9 +1665,9 @@ class TableWidget {
       bar.appendChild(btn);
       return btn;
     };
-    mkBtn("zoom-out", "Zoom out", () => setZoom(scale / 1.25));
+    mkBtn("zoom-out", "Zoom out", () => setZoom(scale / STEP));
     bar.appendChild(level);
-    mkBtn("zoom-in", "Zoom in", () => setZoom(scale * 1.25));
+    mkBtn("zoom-in", "Zoom in", () => setZoom(scale * STEP));
     mkBtn("x", "Close", () => close());
 
     const onLevel = () => resetView();
@@ -1613,10 +1686,10 @@ class TableWidget {
         close();
       } else if (e.key === "+" || e.key === "=") {
         e.preventDefault();
-        setZoom(scale * 1.25);
+        setZoom(scale * STEP);
       } else if (e.key === "-" || e.key === "_") {
         e.preventDefault();
-        setZoom(scale / 1.25);
+        setZoom(scale / STEP);
       } else if (e.key === "0") {
         e.preventDefault();
         resetView();
@@ -2479,7 +2552,7 @@ class TableWidget {
           // Tab off the bottom-right cell grows the table and continues in the
           // new row's first cell, so you can fill a table without reaching for
           // the mouse.
-          if (!e.shiftKey && lastCell) this.appendRowAndEdit(0);
+          if (!e.shiftKey && lastCell && this.plugin.settings.tabAddsRow !== false) this.appendRowAndEdit(0);
           else this.editNeighbor(r, c, 0, e.shiftKey ? -1 : 1, true);
         } else if (e.key === "Enter") {
           e.preventDefault();
@@ -2487,7 +2560,7 @@ class TableWidget {
           // row, so you can keep typing down the column.
           const origin = this.originOf(r, c);
           const endsOnLastRow = origin.r + (this.mergeFor(r, c) ? this.mergeFor(r, c).rs : 1) - 1 === this.cells.length - 1;
-          if (endsOnLastRow) this.appendRowAndEdit(c);
+          if (endsOnLastRow && this.plugin.settings.enterAddsRow !== false) this.appendRowAndEdit(c);
           else this.editNeighbor(r, c, 1, 0);
         } else if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown") {
           // Arrows move the caret within the cell until it hits an edge, then
@@ -2556,7 +2629,7 @@ class TableWidget {
     this.finishEditing();
     const nr = this.cells.length;
     this.cells.push(this.cells[0].map(() => ""));
-    this.rowH.push(TABLE_CELL_H);
+    this.rowH.push(this.defaultH());
     this.dirty = true;
     const tr = this.tableEl.createEl("tr");
     const rowMap = this.cells[0].map(() => null);
@@ -2944,7 +3017,7 @@ class TableWidget {
     this.flushEdit();
     const at = Math.max(0, Math.min(this.cells.length, index));
     this.cells.splice(at, 0, this.cells[0].map(() => ""));
-    this.rowH.splice(at, 0, TABLE_CELL_H);
+    this.rowH.splice(at, 0, this.defaultH());
     this.mergesAfterInsert("row", at);
     this._pendingSelectionOverride = { r0: at, c0: 0, r1: at, c1: 0 };
     this.save();
@@ -2956,7 +3029,7 @@ class TableWidget {
     this.flushEdit();
     const at = Math.max(0, Math.min(this.cells[0].length, index));
     for (const row of this.cells) row.splice(at, 0, "");
-    this.colW.splice(at, 0, TABLE_CELL_W);
+    this.colW.splice(at, 0, this.defaultW());
     this.colAlign.splice(at, 0, null);
     this.mergesAfterInsert("col", at);
     this._pendingSelectionOverride = { r0: 0, c0: at, r1: 0, c1: at };
@@ -3138,6 +3211,7 @@ class TableWidget {
   /** Ctrl/Cmd+V while a cell is selected: fill cells from TSV/CSV text. Text
    *  being pasted into an input, an editor or a cell being edited is ignored. */
   onCellBlockPaste(ev) {
+    if (this.plugin.settings.pasteBlock === false) return;
     if (this.isEditing() || !this.cellSel) return;
     const target = ev.target;
     if (target && target.closest && target.closest("input, textarea, [contenteditable='true'], .bt-zoom-overlay")) return;
@@ -3146,7 +3220,7 @@ class TableWidget {
     if (dt.files && dt.files.length) return; // images have their own path
     const text = dt.getData ? dt.getData("text/plain") : "";
     if (!text || !text.trim()) return;
-    const grid = parseClipboardGrid(text);
+    const grid = parseClipboardGrid(text, this.plugin.settings.csvDelimiter || ",");
     if (!grid) return;
     ev.preventDefault();
     ev.stopPropagation();
@@ -3164,12 +3238,12 @@ class TableWidget {
     const anchor = this.originOf(rect.rA, rect.cA);
     while (this.cells[0].length < anchor.c + width) {
       for (const row of this.cells) row.push("");
-      this.colW.push(TABLE_CELL_W);
+      this.colW.push(this.defaultW());
       this.colAlign.push(null);
     }
     while (this.cells.length < anchor.r + grid.length) {
       this.cells.push(this.cells[0].map(() => ""));
-      this.rowH.push(TABLE_CELL_H);
+      this.rowH.push(this.defaultH());
     }
     const target = { r: anchor.r, c: anchor.c, rs: grid.length, cs: width };
     this.merges = this.merges.filter((m) => !rectsOverlap(m, target));
@@ -3192,7 +3266,10 @@ class TableWidget {
 
   // --- export ---
   toCSV() {
-    return this.cells.map((row) => row.map(csvField).join(",")).join("\n");
+    const delimiter = this.plugin.settings.csvDelimiter || ",";
+    return this.cells
+      .map((row) => row.map((value) => csvField(value, delimiter)).join(delimiter))
+      .join("\n");
   }
 
   toMarkdownTable() {
@@ -3215,7 +3292,11 @@ class TableWidget {
     const app = this.plugin.app;
     const sourcePath = this.ctx.sourcePath || "";
     const noteName = (sourcePath.split("/").pop() || "table").replace(/\.md$/i, "") || "table";
-    const folder = sourcePath.includes("/") ? sourcePath.slice(0, sourcePath.lastIndexOf("/")) : "";
+    const noteFolder = sourcePath.includes("/") ? sourcePath.slice(0, sourcePath.lastIndexOf("/")) : "";
+    const configured = String(this.plugin.settings.exportFolder || "")
+      .replace(/^\/+|\/+$/g, "")
+      .trim();
+    const folder = configured || noteFolder;
     const stamp = attachmentStamp().replace(
       /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/,
       "$1$2$3-$4$5$6"
@@ -3232,6 +3313,7 @@ class TableWidget {
     }
     const content = kind === "csv" ? this.toCSV() : this.toMarkdownTable();
     try {
+      await this.ensureFolder(folder);
       const file = await app.vault.create(path, content);
       new Notice(`Better Tables: exported to ${file.path}`);
       return file;
@@ -3309,11 +3391,11 @@ class TableWidget {
         td.setText(cell.textContent || "");
         td.style.width = `${cell.offsetWidth}px`;
       });
-      tr.style.height = `${(src && src.offsetHeight) || TABLE_CELL_H}px`;
+      tr.style.height = `${(src && src.offsetHeight) || this.defaultH()}px`;
       g.style.width = `${t.offsetWidth}px`;
     } else {
       const geo = this.colBounds();
-      const colW = geo.widths[index] || TABLE_CELL_W;
+      const colW = geo.widths[index] || this.defaultW();
       Array.from(t.rows).forEach((row, r) => {
         const tr = gt.createEl("tr");
         const td = tr.createEl("td");
@@ -3358,6 +3440,7 @@ class TableWidget {
   /** Remember where the user was so the widget re-created after a write can
    *  restore the selection (which also re-arms the table's key handler). */
   rememberSelection(rect) {
+    if (this.plugin.settings.restoreSelection === false) return;
     const sel = rect || (this.cellSel ? this.selRect() : null);
     if (!sel) return;
     this.plugin.pendingSelection = {
@@ -3491,6 +3574,7 @@ module.exports = class BetterTablesPlugin extends Plugin {
     this.activeWidget = null;
 
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.applyUiClasses();
     this.addSettingTab(new BetterTablesSettingTab(this.app, this));
 
     this.registerMarkdownCodeBlockProcessor("table", (source, el, ctx) => {
@@ -3521,8 +3605,7 @@ module.exports = class BetterTablesPlugin extends Plugin {
       id: "insert-table",
       name: "Insert table",
       editorCallback: (editor) => {
-        const block = ["```table", "|     |     |", "| --- | --- |", "|     |     |", "```", ""].join("\n");
-        editor.replaceSelection(block);
+        editor.replaceSelection(this.newTableBlock());
       }
     });
 
@@ -3578,6 +3661,48 @@ module.exports = class BetterTablesPlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+    this.applyUiClasses();
+  }
+
+  /** Markdown for the "Insert table" command, sized by the new-table settings. */
+  newTableBlock() {
+    const settings = this.settings || {};
+    const cols = Math.max(1, Math.min(20, Number(settings.newTableCols) || 2));
+    const bodyRows = Math.max(1, Math.min(100, Number(settings.newTableRows) || 1));
+    const empty = "| " + Array(cols).fill("   ").join(" | ") + " |";
+    const sep = "| " + Array(cols).fill("---").join(" | ") + " |";
+    const lines = ["```table", empty, sep];
+    for (let i = 0; i < bodyRows; i++) lines.push(empty);
+    if (settings.newTableSticky) lines.push("<!-- tk:sticky=1 -->");
+    lines.push("```", "");
+    return lines.join("\n");
+  }
+
+  /** Body-level classes hide chrome and the image zoom control live, without
+   *  needing every table to re-render. */
+  applyUiClasses() {
+    const body = document.body;
+    if (!body) return;
+    const s = this.settings;
+    body.classList.toggle("bt-hide-insert-dots", s.showInsertDots === false);
+    body.classList.toggle("bt-hide-add-buttons", s.showAddButtons === false);
+    body.classList.toggle("bt-hide-handles", s.showReorderHandles === false);
+    body.classList.toggle("bt-hide-dividers", s.showResizeDividers === false);
+    body.classList.toggle("bt-hide-delete-block", s.showDeleteTableButton === false);
+    body.classList.toggle("bt-hide-image-zoom", s.imageZoom === false);
+  }
+
+  onunload() {
+    const body = document.body;
+    if (!body) return;
+    body.classList.remove(
+      "bt-hide-insert-dots",
+      "bt-hide-add-buttons",
+      "bt-hide-handles",
+      "bt-hide-dividers",
+      "bt-hide-delete-block",
+      "bt-hide-image-zoom"
+    );
   }
 
   /** Run write tasks one at a time, in order. */
@@ -3610,7 +3735,8 @@ module.exports = class BetterTablesPlugin extends Plugin {
   pushUndo(key, oldBody, newBody) {
     const h = this.historyEntry(key, oldBody);
     if (h.undo[h.undo.length - 1] !== oldBody) h.undo.push(oldBody);
-    while (h.undo.length > 50) h.undo.shift();
+    const limit = Math.max(5, Math.min(500, Number(this.settings.historyLimit) || 50));
+    while (h.undo.length > limit) h.undo.shift();
     h.redo = [];
     h.last = newBody;
   }
@@ -3624,34 +3750,153 @@ class BetterTablesSettingTab extends PluginSettingTab {
 
   display() {
     const { containerEl } = this;
+    const plugin = this.plugin;
+    const s = plugin.settings;
     containerEl.empty();
-    new Setting(containerEl)
-      .setName("Quick text edit")
-      .setDesc(
-        "On: a single click on a cell edits its text immediately. " +
-          "Off: the first click selects the cell and a second click (or Enter) starts editing."
-      )
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.quickEdit).onChange(async (value) => {
-          this.plugin.settings.quickEdit = value;
-          await this.plugin.saveSettings();
-        })
-      );
+
+    const save = async () => {
+      await plugin.saveSettings();
+    };
+    const heading = (text) => containerEl.createEl("h2", { text });
+    const toggle = (name, desc, key) =>
+      new Setting(containerEl)
+        .setName(name)
+        .setDesc(desc)
+        .addToggle((t) =>
+          t.setValue(s[key] !== false).onChange(async (value) => {
+            s[key] = value;
+            await save();
+          })
+        );
+    const slider = (name, desc, key, min, max, step, fallback) =>
+      new Setting(containerEl)
+        .setName(name)
+        .setDesc(desc)
+        .addSlider((sl) =>
+          sl
+            .setLimits(min, max, step)
+            .setValue(Math.max(min, Math.min(max, Number(s[key]) || fallback)))
+            .setDynamicTooltip()
+            .onChange(async (value) => {
+              s[key] = value;
+              await save();
+            })
+        );
+    const dropdown = (name, desc, key, options) =>
+      new Setting(containerEl)
+        .setName(name)
+        .setDesc(desc)
+        .addDropdown((d) => {
+          for (const [value, label] of options) d.addOption(value, label);
+          d.setValue(String(s[key]));
+          d.onChange(async (value) => {
+            s[key] = value;
+            await save();
+          });
+        });
+    const text = (name, desc, key, placeholder) =>
+      new Setting(containerEl)
+        .setName(name)
+        .setDesc(desc)
+        .addText((t) =>
+          t
+            .setPlaceholder(placeholder)
+            .setValue(String(s[key] || ""))
+            .onChange(async (value) => {
+              s[key] = value.trim();
+              await save();
+            })
+        );
+
+    heading("Editing");
+    toggle(
+      "Quick text edit",
+      "On: a single click on a cell starts editing its text. Off: the first click selects the cell, a second click (or Enter) starts editing.",
+      "quickEdit"
+    );
+    toggle("Tab grows the table", "When Tab is pressed in the bottom-right cell, add a row and continue there.", "tabAddsRow");
+    toggle("Enter grows the table", "When Enter is pressed on the last row, add a row and keep typing in the same column.", "enterAddsRow");
+    dropdown(
+      "Merged cell content",
+      "What happens to the text of the cells being merged. “Keep all text” joins it into the merged cell, one line per cell; “Keep top-left only” discards the rest.",
+      "mergeContent",
+      [
+        ["join", "Keep all text"],
+        ["first", "Keep top-left only"]
+      ]
+    );
+
+    heading("Table chrome");
+    toggle("Show insert dots", "The small “+” between rows and columns that appears on hover.", "showInsertDots");
+    toggle("Show add buttons", "The “+” buttons on the bottom and right edges.", "showAddButtons");
+    toggle("Show reorder handles", "The grab handles on the top and left edges for moving rows and columns.", "showReorderHandles");
+    toggle("Show resize dividers", "The invisible strips on cell borders that resize a column or row when dragged.", "showResizeDividers");
+    toggle("Show delete-table button", "The trash button shown in the block's top-right corner.", "showDeleteTableButton");
+
+    heading("Sizing");
+    slider("Default column width", "Pixels used for new columns and for tables without stored widths.", "defaultColumnWidth", 60, 400, 10, 140);
+    slider("Default row height", "Pixels used for new rows and for tables without stored heights.", "defaultRowHeight", 28, 200, 2, 48);
+    slider("Minimum column width", "Columns can't be dragged narrower than this.", "minColumnWidth", 30, 200, 5, 50);
+    slider("Minimum row height", "Rows can't be dragged shorter than this.", "minRowHeight", 20, 100, 2, 28);
+
+    heading("Clipboard and images");
+    toggle(
+      "Paste a block of cells",
+      "Ctrl/Cmd+V with a cell selected fills the table from TSV/CSV on the clipboard, adding rows and columns as needed.",
+      "pasteBlock"
+    );
     const plugins = this.app.plugins && this.app.plugins.plugins;
     const converterInstalled = !!(plugins && plugins["image-converter"]);
+    toggle(
+      "Process pasted images with Image Converter",
+      (converterInstalled
+        ? "Image Converter is installed: pasted and dropped images go through its pipeline, so its conversion, resizing, filename and link-format presets apply."
+        : "Requires the Image Converter plugin (not detected right now). When installed, pasted and dropped images go through its pipeline so its presets apply.") +
+        " Turn this off to always save images directly.",
+      "imageConverterPaste"
+    );
+    toggle("Show image zoom button", "The button in an image's corner that opens the full-screen preview.", "imageZoom");
+    slider("Zoom: minimum", "Smallest preview zoom, in percent.", "imageZoomMin", 10, 100, 5, 25);
+    slider("Zoom: maximum", "Largest preview zoom, in percent.", "imageZoomMax", 200, 1600, 50, 800);
+    slider("Zoom: step", "How much the +, − buttons and keys zoom per press, in percent.", "imageZoomStep", 10, 100, 5, 25);
+
+    heading("History and export");
+    slider("Undo steps kept", "How many changes each table remembers. Higher uses more memory.", "historyLimit", 10, 200, 10, 50);
+    toggle(
+      "Restore selection after changes",
+      "After a merge, insert, undo or other change re-renders the table, select the same cells again so keyboard shortcuts keep working.",
+      "restoreSelection"
+    );
+    dropdown("CSV delimiter", "Separator used by “Copy table as CSV” and “Export table as CSV file”, and recognised when pasting CSV.", "csvDelimiter", [
+      [",", "Comma"],
+      [";", "Semicolon"],
+      ["\t", "Tab"]
+    ]);
+    text(
+      "Export folder",
+      "Vault folder for exported CSV/Markdown files. Leave empty to write next to the note.",
+      "exportFolder",
+      "Same folder as the note"
+    );
+
+    heading("New tables");
+    slider("Rows in a new table", "Body rows created by the “Insert table” command.", "newTableRows", 1, 20, 1, 1);
+    slider("Columns in a new table", "Columns created by the “Insert table” command.", "newTableCols", 1, 10, 1, 2);
+    toggle("Sticky header on new tables", "Turn the sticky header row on automatically for tables created with the command.", "newTableSticky");
+
+    heading("Reset");
     new Setting(containerEl)
-      .setName("Process pasted images with Image Converter")
-      .setDesc(
-        (converterInstalled
-          ? "Image Converter is installed: pasted and dropped images go through its pipeline, so its conversion, resizing, filename and link-format presets apply."
-          : "Requires the Image Converter plugin (not detected right now). When installed, pasted and dropped images go through its pipeline so its presets apply.") +
-          " Turn this off to always save images directly."
-      )
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.imageConverterPaste !== false).onChange(async (value) => {
-          this.plugin.settings.imageConverterPaste = value;
-          await this.plugin.saveSettings();
-        })
+      .setName("Reset all settings")
+      .setDesc("Restore every option on this page to its default value.")
+      .addButton((button) =>
+        button
+          .setButtonText("Reset")
+          .setWarning()
+          .onClick(async () => {
+            plugin.settings = Object.assign({}, DEFAULT_SETTINGS);
+            await save();
+            this.display();
+          })
       );
   }
 }

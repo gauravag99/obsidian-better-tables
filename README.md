@@ -156,7 +156,37 @@ Embeds are written the way Obsidian itself writes them — following your **link
 Images inside a cell behave like they do elsewhere in Obsidian: links, embeds and controls added by other plugins (image toolbars, converters, zoom buttons…) receive their own clicks, and right-clicking an image opens its native menu — with whatever other plugins add to it — instead of the table's menu. To select a cell that is completely covered by an image, click its border or reach it with the keyboard.
 
 ## Settings
-If you like to immediately select & edit text (bypassing having to select the cell first), you can turn on ````Quick text edit```` in the setting.
+
+Everything is under **Settings → Better Tables**, grouped by area:
+
+**Editing**
+- *Quick text edit* — one click edits a cell instead of selecting it first.
+- *Tab grows the table* / *Enter grows the table* — whether Tab in the last cell / Enter on the last row adds a row.
+- *Merged cell content* — keep all selected text in the merged cell, or keep only the top-left cell.
+
+**Table chrome**
+- Show or hide the insert dots, the edge `+` buttons, the reorder handles, the resize dividers and the delete-table button. These apply immediately to every table.
+
+**Sizing**
+- Default column width and row height (used for new columns/rows and tables without stored sizes).
+- Minimum column width and row height for dragging.
+
+**Clipboard and images**
+- *Paste a block of cells* — turn `Ctrl/Cmd+V` block pasting on or off.
+- *Process pasted images with Image Converter* — hand clipboard images to that plugin, or always save them directly.
+- *Show image zoom button*, plus the preview's minimum zoom, maximum zoom and per-step amount.
+
+**History and export**
+- *Undo steps kept* — how many changes each table remembers.
+- *Restore selection after changes* — reselect the cells after a write so keyboard shortcuts keep working.
+- *CSV delimiter* — comma, semicolon or tab, used when exporting and recognised when pasting.
+- *Export folder* — where exported files go; empty means next to the note.
+
+**New tables**
+- Rows, columns and whether the sticky header starts on for tables created with *Insert table*.
+
+**Reset**
+- One button to restore every option to its default.
 
 ## Installation
 Add to Obsidian https://community.obsidian.md/plugins/better-tables

@@ -291,6 +291,32 @@
 	color: var(--text-normal);
 }
 
+/* Settings that hide table chrome. Body-level classes apply live, without
+   waiting for every table to re-render. */
+body.bt-hide-insert-dots .cp-insert {
+	display: none;
+}
+
+body.bt-hide-add-buttons .cp-table-add {
+	display: none;
+}
+
+body.bt-hide-handles .cp-table-handle {
+	display: none;
+}
+
+body.bt-hide-dividers .cp-table-divider {
+	display: none;
+}
+
+body.bt-hide-delete-block .cp-delete-block {
+	display: none;
+}
+
+body.bt-hide-image-zoom .cp-img-zoom {
+	display: none;
+}
+
 @media (max-width: 480px) {
 	.bt-zoom-bar {
 		top: auto;
