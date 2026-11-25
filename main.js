@@ -356,6 +356,10 @@ class TableWidget {
     this.tdMap = [];
     // Header row + internal scrolling with a sticky header (per table).
     this.sticky = false;
+    this.stickyHeadEl = null;
+    this.stickyHeadInner = null;
+    this.stickyHeadRoot = null;
+    this.stickyOnScroll = null;
     this.editingCell = null;
     this.editingPos = null;
     this.dirty = false;
@@ -400,6 +404,7 @@ class TableWidget {
    *  block (re-render, view close, plugin unload) via the render child below. */
   destroy() {
     this.closeImageZoom();
+    this.removeStickyHead();
     // Re-rendering replaces the widget while a cell selection may still be
     // active; its document-level key/paste handlers must not outlive it.
     this.clearCellSelection();
@@ -578,7 +583,6 @@ class TableWidget {
     this.el.toggleClass("cp-table-readonly", this.readOnly);
 
     const scroll = this.el.createDiv({ cls: "cp-table-scroll" });
-    scroll.toggleClass("is-sticky", this.sticky);
     const root = (this.rootEl = scroll.createDiv({ cls: "cp-table-root" }));
     const table = (this.tableEl = root.createEl("table", { cls: "cp-table" }));
     table.toggleClass("is-sticky-header", this.sticky);
@@ -612,6 +616,7 @@ class TableWidget {
     }
     this.applySizes();
     this.applyAlign();
+    this.bindStickyHeader();
 
     // Reading view: static table only. Cells are rendered above with no edit
     // listeners (see bindCell); skip all the interactive chrome below.
@@ -902,6 +907,10 @@ class TableWidget {
       }
     });
     this.positionDeleteBtn();
+    if (this.sticky) {
+      this.buildStickyHead();
+      this.updateStickyHead();
+    }
   }
 
   /** Drag a divider to resize the column left of / row above it. */
@@ -2990,16 +2999,139 @@ class TableWidget {
     this.save();
   }
 
-  /** Sticky header row (the table then scrolls inside a capped box). */
+  /** Sticky header row: a copy of the first row floats at the top of the note
+   *  view while the table is scrolled through. */
   toggleSticky() {
     this.flushEdit();
     this.sticky = !this.sticky;
     if (this.tableEl) this.tableEl.toggleClass("is-sticky-header", this.sticky);
-    const scroll = this.el.querySelector(".cp-table-scroll");
-    if (scroll) scroll.toggleClass("is-sticky", this.sticky);
+    this.bindStickyHeader();
     this.dirty = true;
     this.save();
     new Notice(this.sticky ? "Better Tables: sticky header on." : "Better Tables: sticky header off.");
+  }
+
+  /** Nearest scrolling ancestor of this block (the note view's scroller). */
+  stickyScope() {
+    const view = this.doc.defaultView;
+    if (!view) return null;
+    let node = this.el.parentElement;
+    while (node && node !== this.doc.body) {
+      const style = view.getComputedStyle(node);
+      if (/(auto|scroll)/.test(style.overflowY)) return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  bindStickyHeader() {
+    const view = this.doc.defaultView || window;
+    if (!this.sticky) {
+      this.removeStickyHead();
+      return;
+    }
+    if (!this.stickyHeadEl) {
+      const head = this.doc.createElement("div");
+      head.className = "bt-sticky-head";
+      const inner = this.doc.createElement("div");
+      inner.className = "bt-sticky-inner";
+      const root = this.doc.createElement("div");
+      root.className = "cp-table-root";
+      inner.appendChild(root);
+      head.appendChild(inner);
+      this.doc.body.appendChild(head);
+      this.stickyHeadEl = head;
+      this.stickyHeadInner = inner;
+      this.stickyHeadRoot = root;
+    }
+    if (!this.stickyOnScroll) {
+      this.stickyOnScroll = () => this.updateStickyHead();
+      view.addEventListener("scroll", this.stickyOnScroll, true);
+      view.addEventListener("resize", this.stickyOnScroll);
+    }
+    this.buildStickyHead();
+    this.updateStickyHead();
+  }
+
+  removeStickyHead() {
+    const view = this.doc.defaultView || window;
+    if (this.stickyOnScroll) {
+      view.removeEventListener("scroll", this.stickyOnScroll, true);
+      view.removeEventListener("resize", this.stickyOnScroll);
+      this.stickyOnScroll = null;
+    }
+    if (this.stickyHeadEl) {
+      this.stickyHeadEl.remove();
+      this.stickyHeadEl = null;
+      this.stickyHeadInner = null;
+      this.stickyHeadRoot = null;
+    }
+  }
+
+  /** Copy the live first row into the floating header: widths, alignment,
+   *  merges and header styling come along with it. */
+  buildStickyHead() {
+    const table = this.tableEl;
+    if (!this.sticky || !this.stickyHeadRoot || !table || !table.rows[0]) return;
+    const row = table.rows[0];
+    const cloneTable = this.doc.createElement("table");
+    cloneTable.className = "cp-table";
+    const cloneRow = row.cloneNode(true);
+    // No interactive chrome in the floating copy.
+    Array.from(cloneRow.querySelectorAll(".cp-img-zoom, button, input, [role='button']")).forEach((node) => node.remove());
+    cloneTable.appendChild(cloneRow);
+    cloneTable.style.width = `${table.offsetWidth}px`;
+    cloneTable.style.tableLayout = "fixed";
+    Array.from(row.cells).forEach((cell, i) => {
+      const copy = cloneRow.cells[i];
+      if (copy && cell) copy.style.width = `${cell.offsetWidth}px`;
+    });
+    cloneRow.style.height = `${row.offsetHeight}px`;
+    while (this.stickyHeadRoot.firstChild) this.stickyHeadRoot.removeChild(this.stickyHeadRoot.firstChild);
+    this.stickyHeadRoot.appendChild(cloneTable);
+  }
+
+  updateStickyHead() {
+    const head = this.stickyHeadEl;
+    if (!head) return;
+    const table = this.tableEl;
+    const hide = () => {
+      head.style.display = "none";
+    };
+    if (!this.sticky || !table || !table.isConnected || !table.rows[0]) {
+      hide();
+      return;
+    }
+    const view = this.doc.defaultView || window;
+    const scope = this.stickyScope();
+    const scopeRect = scope
+      ? scope.getBoundingClientRect()
+      : { left: 0, top: 0, right: view.innerWidth, width: view.innerWidth };
+    const tableRect = table.getBoundingClientRect();
+    const rowRect = table.rows[0].getBoundingClientRect();
+    const headH = rowRect.height || this.rowH[0] || 0;
+    const top = Math.max(0, scopeRect.top);
+    const left = Math.max(0, scopeRect.left);
+    const viewWidth = view.innerWidth || this.doc.documentElement.clientWidth || 0;
+    const width = Math.min(scopeRect.width || viewWidth, viewWidth - left);
+    const show =
+      rowRect.top < top - 0.5 &&
+      tableRect.bottom > top + headH &&
+      tableRect.right > left &&
+      tableRect.left < left + width;
+    if (!show) {
+      hide();
+      return;
+    }
+    head.style.display = "block";
+    head.style.left = `${left}px`;
+    head.style.top = `${top}px`;
+    head.style.width = `${width}px`;
+    if (this.stickyHeadInner) {
+      const offset = Math.round(tableRect.left - left);
+      this.stickyHeadInner.style.width = `${tableRect.width}px`;
+      this.stickyHeadInner.style.transform = offset ? `translateX(${offset}px)` : "";
+    }
   }
 
   // --- pasting a block of cells ---

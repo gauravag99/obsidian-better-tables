@@ -12,7 +12,7 @@ If you are frustrated with making tables in your notes, install this. Summon the
 - **Paste a block of cells.** `Ctrl/Cmd+V` fills the selection from TSV/CSV copied out of Excel, Google Sheets or Numbers, adding rows and columns as needed.
 - **Undo and redo table changes.** `Ctrl/Cmd+Z`, `Ctrl/Cmd+Shift+Z` or `Ctrl+Y` steps through merges, inserts, deletes, pastes, alignment and cell edits.
 - **Export the table** as a CSV or Markdown file, or copy it as CSV/Markdown, from the command palette.
-- **Sticky header row.** Turn it on per table (right-click → *Sticky header row*) and the table scrolls inside a capped box with the first row pinned.
+- **Sticky header row.** Turn it on per table (right-click → *Sticky header row*); the first row then floats at the top of the note pane while you scroll through the table.
 - **Merge cells.** Select a block of cells and right-click → **Merge cells** (or press `Alt+M`). Right-click a merged cell → **Unmerge cells** (or `Alt+Shift+M`).
 - **Paste a picture into a cell.** It's saved to your attachment folder and embedded; it no longer disappears when you leave the cell. With [Image Converter](https://github.com/xRyul/obsidian-image-converter) installed, pasted images go through its conversion and naming presets first.
 - **Hover an image to zoom it.** A small button appears in the image's corner and opens a full-screen preview you can zoom and pan; the note is never modified.
@@ -130,7 +130,9 @@ Merged cells export as their top-left value with empty covered cells, the same a
 
 ## Sticky header
 
-Right-click a cell → **Sticky header row** (or the palette command *Toggle sticky header row*). The table then gets its own scroll box, capped at 70 % of the viewport height (`--bt-sticky-height` can override that), and the first row stays pinned while the rest scrolls. The option is stored per table in the metadata comment (`;sticky=1`).
+Right-click a cell → **Sticky header row** (or the palette command *Toggle sticky header row*). The first row then floats at the top of the note pane while you scroll through the table, and disappears once the table is out of view.
+
+The floating row is a live copy of the real header — column widths, alignment, merged cells and header styling all match — pinned to the top of the note's own scroll area. It ignores the mouse, so links and text underneath behave normally, and the table keeps its normal height instead of getting its own scroll box. The option is stored per table in the metadata comment (`;sticky=1`).
 
 ## Commands and shortcuts
 

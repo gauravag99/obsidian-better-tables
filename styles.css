@@ -116,19 +116,27 @@
 	max-width: 100%;
 }
 
-/* Stick header row: the table gets its own capped scroll box so the first row
-   can stay pinned while the rest scrolls. */
-.cp-table-scroll.is-sticky {
-	max-height: var(--bt-sticky-height, 70vh);
-	overflow-y: auto;
+/* Sticky header: a floating copy of the first row, pinned to the note's
+   scroll area while the table is in view. Built in main.js from the real row,
+   so widths and merges match. */
+.bt-sticky-head {
+	position: fixed;
+	z-index: var(--bt-sticky-z, 12);
+	display: none;
+	overflow: hidden;
+	pointer-events: none;
 }
 
-.cp-table.is-sticky-header tr:first-child > td {
-	position: sticky;
-	top: 0;
-	z-index: 3;
+.bt-sticky-head .cp-table-root {
+	display: block;
+}
+
+.bt-sticky-head .cp-table {
+	box-shadow: 0 1px 0 var(--background-modifier-border), 0 6px 16px rgba(0, 0, 0, 0.16);
+}
+
+.bt-sticky-head .cp-table td {
 	background: var(--background-secondary);
-	box-shadow: inset 0 -1px 0 var(--background-modifier-border);
 }
 
 /* Hover zoom control on images inside a cell. The frame only wraps plain
