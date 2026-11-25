@@ -10,7 +10,7 @@ If you are frustrated with making tables in your notes, install this. Summon the
 - **Press `Enter` on a selected cell** to start editing it.
 - **Drag across cells** to select a block. Then copy it, or press `Delete` to clear it.
 - **Merge cells.** Select a block of cells and right-click → **Merge cells** (or press `Alt+M`). Right-click a merged cell → **Unmerge cells** (or `Alt+Shift+M`).
-- **Paste a picture into a cell.** It's saved to your attachment folder and embedded; it no longer disappears when you leave the cell.
+- **Paste a picture into a cell.** It's saved to your attachment folder and embedded; it no longer disappears when you leave the cell. With [Image Converter](https://github.com/xRyul/obsidian-image-converter) installed, pasted images go through its conversion and naming presets first.
 - **Drag the lines** between rows and columns to resize them.
 - **Drag the handles** on the top and left edges to reorder rows and columns.
 - **Hover between cells** and click the dot to insert a row or column.
@@ -66,6 +66,18 @@ A cell holds Markdown text, so a picture pasted straight from the clipboard is w
 - Embeds are limited to the column width, so the table layout stays intact.
 - Plain text, `[[links]]` and existing `![[embeds]]` paste exactly as before.
 - Dropping an image file onto a cell appends it the same way.
+
+### With Image Converter installed
+
+If you use [Image Converter](https://github.com/xRyul/obsidian-image-converter), pasted and dropped cell images are handed to it instead of being written directly. That plugin only listens to Obsidian's editor paste, which never fires inside a cell, so Better Tables runs its pipeline with a stand-in editor and inserts the link it produces. In practice this means its **conversion** (e.g. WebP), **resizing**, **filename variables** (`name-timestamp`), **destination folder** and **link format** presets all apply to table images, e.g.:
+
+```md
+![](./Attachments/Coherences_AMP_OFF_vs_ON-1795639929937.webp)
+```
+
+Its preset-selection modal appears as usual if you configured it to ask. Turn this off in **Settings → Better Tables → Process pasted images with Image Converter** to always save images directly. If the plugin is missing, disabled, processing fails, or the table's note isn't the active file, Better Tables falls back to saving the image itself.
+
+Embeds written by Better Tables are always caption-free; Image Converter's own *image captions* setting, if enabled, still applies to the images it creates.
 
 Embeds are written the way Obsidian itself writes them — following your **link format** settings (wikilinks or Markdown links, relative or vault-absolute path) — but with the display text removed: `![[Attachments/photo.webp]]`, or `![](./Attachments/photo.webp)`. Themes and plugins that render alt text as a caption therefore have nothing to show, instead of labelling every picture with its file name.
 

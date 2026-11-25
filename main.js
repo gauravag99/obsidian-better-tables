@@ -5,7 +5,10 @@ const { Plugin, Notice, setIcon, Menu, PluginSettingTab, Setting, MarkdownRender
 const DEFAULT_SETTINGS = {
   // false: click selects a cell, a second click (or Enter) edits it.
   // true:  a single click edits the cell immediately ("quick text edit").
-  quickEdit: false
+  quickEdit: false,
+  // Hand pasted images to the Image Converter plugin when it is installed, so
+  // its conversion/naming/link presets apply to cell images too.
+  imageConverterPaste: true
 };
 
 const TABLE_CELL_W = 140;
@@ -1021,9 +1024,86 @@ class TableWidget {
     return files;
   }
 
+  /** The Image Converter plugin (id `image-converter`), when installed and
+   *  enabled. It hooks Obsidian's `editor-paste`, which never fires inside a
+   *  cell, so its conversion/naming/link presets would otherwise never see
+   *  pasted cell images. */
+  imageConverter() {
+    if (this.plugin.settings.imageConverterPaste === false) return null;
+    const plugins = this.plugin.app.plugins;
+    const list = plugins && plugins.plugins;
+    const other = list && list["image-converter"];
+    if (!other || typeof other.handlePaste !== "function") return null;
+    return other;
+  }
+
+  /** Run Image Converter's paste pipeline with a stand-in Editor that captures
+   *  the link it would have written into the note. Returns the captured links,
+   *  or null when the integration is unavailable or produced nothing (callers
+   *  then save the image themselves). */
+  async imagesViaImageConverter(files) {
+    const other = this.imageConverter();
+    if (!other || !files.length) return null;
+    const app = this.plugin.app;
+    const sourcePath = this.ctx.sourcePath || "";
+    const active = app.workspace && typeof app.workspace.getActiveFile === "function" ? app.workspace.getActiveFile() : null;
+    // Relative link paths and the attachment folder are resolved from the
+    // active file; only delegate when the table's note is that file.
+    if (!active || (sourcePath && active.path !== sourcePath)) return null;
+
+    const captured = [];
+    let cursor = { line: 0, ch: 0 };
+    const noop = () => {};
+    const editor = {
+      getCursor: () => cursor,
+      setCursor: (pos) => {
+        if (pos) cursor = { line: pos.line || 0, ch: pos.ch || 0 };
+      },
+      getValue: () => "",
+      setValue: noop,
+      getLine: () => "",
+      setLine: noop,
+      lineCount: () => 0,
+      lastLine: () => 0,
+      getSelection: () => "",
+      getRange: () => "",
+      replaceSelection: (text) => {
+        captured.push(String(text));
+      },
+      replaceRange: (text) => {
+        captured.push(String(text));
+      },
+      somethingSelected: () => false,
+      listSelections: () => [],
+      setSelection: noop,
+      setSelections: noop,
+      focus: noop,
+      blur: noop,
+      exec: noop,
+      transaction: noop,
+      posToOffset: () => 0,
+      offsetToPos: () => ({ line: 0, ch: 0 }),
+      scrollIntoView: noop,
+      scrollTo: noop,
+      getScrollInfo: () => ({ from: { line: 0, ch: 0 }, to: { line: 0, ch: 0 } }),
+      processLines: noop
+    };
+    const items = files.map((file) => ({ kind: "file", type: file.type || "", file }));
+    try {
+      await other.handlePaste(items, editor, { line: 0, ch: 0 });
+    } catch (err) {
+      console.warn("Better Tables: Image Converter could not process the image; saving it directly.", err);
+      return null;
+    }
+    const links = captured.map((text) => String(text).trim()).filter(Boolean);
+    return links.length ? links : null;
+  }
+
   /** Save every image and return the embed lines, or null if saving failed. */
   async imageEmbedsFrom(files, srcs) {
     const lines = [];
+    const viaConverter = files.length ? await this.imagesViaImageConverter(files) : null;
+    if (viaConverter) return viaConverter;
     try {
       for (const file of files.slice(0, 20)) lines.push(await this.savePastedImage(file));
       for (const src of srcs.slice(0, 20)) {
@@ -2586,6 +2666,22 @@ class BetterTablesSettingTab extends PluginSettingTab {
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.quickEdit).onChange(async (value) => {
           this.plugin.settings.quickEdit = value;
+          await this.plugin.saveSettings();
+        })
+      );
+    const plugins = this.app.plugins && this.app.plugins.plugins;
+    const converterInstalled = !!(plugins && plugins["image-converter"]);
+    new Setting(containerEl)
+      .setName("Process pasted images with Image Converter")
+      .setDesc(
+        (converterInstalled
+          ? "Image Converter is installed: pasted and dropped images go through its pipeline, so its conversion, resizing, filename and link-format presets apply."
+          : "Requires the Image Converter plugin (not detected right now). When installed, pasted and dropped images go through its pipeline so its presets apply.") +
+          " Turn this off to always save images directly."
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.imageConverterPaste !== false).onChange(async (value) => {
+          this.plugin.settings.imageConverterPaste = value;
           await this.plugin.saveSettings();
         })
       );
