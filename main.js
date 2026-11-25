@@ -14,7 +14,25 @@ const MIN_W = 50;
 const MIN_H = 28;
 const MAX_LINK_SUGGESTIONS = 20;
 
-const SIZE_RE = /^\s*<!--\s*tk:cols=([\d.,\s]*);rows=([\d.,\s]*)\s*-->\s*$/;
+/** The metadata comment. Sizes were 0.2.x; merges are appended as one extra
+ *  key, so a block written by an older version still parses. merge= entries
+ *  are `r,c,rowSpan,colSpan` separated by `|`. */
+const META_RE = /^\s*<!--\s*tk:cols=([\d.,\s]*);rows=([\d.,\s]*)(?:;merge=([\d.,| \t]*))?\s*-->\s*$/;
+
+/** Markdown tables cannot express colspan/rowspan, so merged regions are kept
+ *  in the same hidden comment as the sizes. Every other cell of a merged
+ *  region is written as an empty cell, which keeps the block readable as a
+ *  plain markdown table. */
+function rectsOverlap(a, b) {
+  return a.r < b.r + b.rs && b.r < a.r + a.rs && a.c < b.c + b.cs && b.c < a.c + a.cs;
+}
+
+/** Position of old index `i` after moving the item at `from` to `to`. */
+function movePos(i, from, to) {
+  if (i === from) return to;
+  if (from < to) return i > from && i <= to ? i - 1 : i;
+  return i >= to && i < from ? i + 1 : i;
+}
 
 function sumArr(a) {
   return a.reduce((s, n) => s + n, 0);
@@ -143,17 +161,32 @@ function parseAlign(text) {
   return null;
 }
 
-/** Pull stored column/row sizes out of the trailing size comment, if present. */
-function parseSizes(text) {
+/** Pull stored column/row sizes (and merged regions) out of the metadata
+ *  comment, if present. */
+function parseMeta(text) {
   for (const line of text.split("\n")) {
-    const m = line.match(SIZE_RE);
+    const m = line.match(META_RE);
     if (m) {
       const nums = (s) =>
         s.split(",").map((n) => Number(n.trim())).filter((n) => Number.isFinite(n) && n > 0);
-      return { cols: nums(m[1]), rows: nums(m[2]) };
+      const merges = [];
+      for (const raw of (m[3] || "").split("|")) {
+        const parts = raw.split(",").map((n) => Number(n.trim()));
+        if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) continue;
+        const [r, c, rs, cs] = parts;
+        if (r < 0 || c < 0 || rs < 1 || cs < 1) continue;
+        if (rs === 1 && cs === 1) continue;
+        merges.push({ r, c, rs, cs });
+      }
+      return { cols: nums(m[1]), rows: nums(m[2]), merges };
     }
   }
   return null;
+}
+
+function parseSizes(text) {
+  const meta = parseMeta(text);
+  return meta ? { cols: meta.cols, rows: meta.rows } : null;
 }
 
 class TableWidget {
@@ -166,6 +199,12 @@ class TableWidget {
     this.colW = [];
     this.rowH = [];
     this.colAlign = [];
+    // Merged regions: { r, c, rs, cs } with the origin cell at (r, c).
+    // mergeAt[r][c] points at the region covering a grid position (or is
+    // null); tdMap[r][c] is the <td> that paints it (the region's origin cell).
+    this.merges = [];
+    this.mergeAt = [];
+    this.tdMap = [];
     this.editingCell = null;
     this.editingPos = null;
     this.dirty = false;
@@ -235,7 +274,7 @@ class TableWidget {
   loadSizes() {
     const cols = this.cells[0].length;
     const rows = this.cells.length;
-    const stored = parseSizes(this.source);
+    const stored = parseMeta(this.source);
     const pc = stored && stored.cols;
     const pr = stored && stored.rows;
     this.colW = Array.isArray(pc) && pc.length === cols ? pc.map((n) => Math.max(MIN_W, n)) : [];
@@ -250,13 +289,101 @@ class TableWidget {
     this.colAlign = Array.isArray(a) && a.length === cols ? a : Array(cols).fill(null);
   }
 
-  /** Apply per-column text alignment to the cells. */
+  /** Read the stored merged regions and keep only the ones that still fit the
+   *  table. A merge whose covered cells hold text is dropped rather than
+   *  hiding that text (that only happens when the block was edited by hand in
+   *  source mode, since we always blank the covered cells on merge). */
+  loadMerges() {
+    const rows = this.cells.length;
+    const cols = this.cells[0].length;
+    const meta = parseMeta(this.source);
+    const used = Array.from({ length: rows }, () => Array(cols).fill(false));
+    const out = [];
+    for (const m of (meta && meta.merges) || []) {
+      const r = m.r;
+      const c = m.c;
+      const rs = m.rs;
+      const cs = m.cs;
+      if (r < 0 || c < 0 || r + rs > rows || c + cs > cols) continue;
+      let ok = true;
+      for (let ri = r; ri < r + rs && ok; ri++) {
+        for (let ci = c; ci < c + cs; ci++) {
+          if (used[ri][ci] || (ri !== r || ci !== c) && (this.cells[ri][ci] || "").trim() !== "") {
+            ok = false;
+            break;
+          }
+        }
+      }
+      if (!ok) continue;
+      for (let ri = r; ri < r + rs; ri++) for (let ci = c; ci < c + cs; ci++) used[ri][ci] = true;
+      out.push({ r, c, rs, cs });
+    }
+    this.merges = out;
+    this.buildMergeIndex();
+  }
+
+  /** Index merged regions by grid position. */
+  buildMergeIndex() {
+    const rows = this.cells.length;
+    const cols = this.cells[0].length;
+    this.mergeAt = Array.from({ length: rows }, () => Array(cols).fill(null));
+    for (const m of this.merges) {
+      for (let ri = m.r; ri < m.r + m.rs; ri++) {
+        for (let ci = m.c; ci < m.c + m.cs; ci++) this.mergeAt[ri][ci] = m;
+      }
+    }
+  }
+
+  /** The merged region covering a grid position, if any. */
+  mergeFor(r, c) {
+    return (this.mergeAt[r] && this.mergeAt[r][c]) || null;
+  }
+
+  /** True when (r, c) is part of a merge but is not its origin cell. */
+  isCovered(r, c) {
+    const m = this.mergeFor(r, c);
+    return !!m && (m.r !== r || m.c !== c);
+  }
+
+  /** Grid position of the cell that owns (r, c) — the merge origin for a
+   *  covered position, otherwise the position itself. */
+  originOf(r, c) {
+    const m = this.mergeFor(r, c);
+    return m ? { r: m.r, c: m.c } : { r, c };
+  }
+
+  /** The <td> that paints grid position (r, c), resolving merges. */
+  tdAt(r, c) {
+    const o = this.originOf(r, c);
+    return (this.tdMap[o.r] && this.tdMap[o.r][o.c]) || null;
+  }
+
+  /** Column geometry in table-local pixels. Derived from the stored widths
+   *  (which are exactly what the colgroup is given) so it stays correct when
+   *  row 0 has merged cells and DOM cell indexes no longer map to columns. */
+  colBounds() {
+    const cols = (this.cells[0] && this.cells[0].length) || 0;
+    const widths = [];
+    const lefts = [];
+    let x = 0;
+    for (let c = 0; c < cols; c++) {
+      const w = this.colW[c] || TABLE_CELL_W;
+      lefts[c] = x;
+      widths[c] = w;
+      x += w;
+    }
+    return { lefts, widths, total: x };
+  }
+
+  /** Apply per-column text alignment to the cells. A merged cell follows the
+   *  alignment of its origin column. */
   applyAlign() {
     const t = this.tableEl;
     if (!t) return;
     Array.from(t.rows).forEach((tr) => {
-      Array.from(tr.cells).forEach((td, c) => {
-        td.style.textAlign = this.colAlign[c] || "";
+      Array.from(tr.cells).forEach((td) => {
+        const c = td._btC;
+        td.style.textAlign = c == null ? "" : this.colAlign[c] || "";
       });
     });
   }
@@ -268,6 +395,7 @@ class TableWidget {
     this.editingCell = null;
     this.loadSizes();
     this.loadAlign();
+    this.loadMerges();
     this.clearLineSelection();
     this.clearCellSelection();
     this.el.empty();
@@ -287,13 +415,31 @@ class TableWidget {
     const colgroup = table.createEl("colgroup");
     for (let c = 0; c < this.cells[0].length; c++) colgroup.createEl("col");
 
+    const rows = this.cells.length;
+    const cols = this.cells[0].length;
+    // Only the origin cell of a merged region is created; covered positions
+    // are painted by it (rowspan/colspan) and still resolve through tdMap.
+    this.tdMap = Array.from({ length: rows }, () => Array(cols).fill(null));
     this.cells.forEach((row, r) => {
       const tr = table.createEl("tr");
       row.forEach((cellText, c) => {
+        if (this.isCovered(r, c)) return;
+        const m = this.mergeFor(r, c);
         const td = tr.createEl("td");
+        if (m && m.rs > 1) td.rowSpan = m.rs;
+        if (m && m.cs > 1) td.colSpan = m.cs;
+        td._btR = r;
+        td._btC = c;
+        this.tdMap[r][c] = td;
         this.bindCell(td, r, c, cellText);
       });
     });
+    for (const m of this.merges) {
+      const td = this.tdMap[m.r][m.c];
+      for (let ri = m.r; ri < m.r + m.rs; ri++) {
+        for (let ci = m.c; ci < m.c + m.cs; ci++) this.tdMap[ri][ci] = td;
+      }
+    }
     this.applySizes();
     this.applyAlign();
 
@@ -324,8 +470,6 @@ class TableWidget {
       this.save();
     });
 
-    const cols = this.cells[0].length;
-    const rows = this.cells.length;
     this.colHandles = [];
     this.rowHandles = [];
     this.colDividers = [];
@@ -415,15 +559,18 @@ class TableWidget {
     }
     const x = Math.min(Math.max(e.clientX, rect.left + 1), rect.right - 1);
     const y = Math.min(Math.max(e.clientY, rect.top + 1), rect.bottom - 1);
+    // Column index from geometry, not from row 0's cells: merged cells make
+    // row.cells indexes meaningless as column numbers.
+    const colGeo = this.colBounds();
+    const localX = x - rect.left;
     let c = 0;
     let r = 0;
-    const first = t.rows[0];
-    for (let i = 0; i < ((first && first.cells.length) || 0); i++) {
-      const cr = first.cells[i].getBoundingClientRect();
-      if (x >= cr.left && x <= cr.right) {
+    for (let i = 0; i < colGeo.widths.length; i++) {
+      if (localX >= colGeo.lefts[i] && localX <= colGeo.lefts[i] + colGeo.widths[i]) {
         c = i;
         break;
       }
+      c = i;
     }
     for (let i = 0; i < t.rows.length; i++) {
       const rr = t.rows[i].getBoundingClientRect();
@@ -464,9 +611,11 @@ class TableWidget {
         this.cells.forEach((row) => row.splice(boundary + 1, 0, ""));
         this.colW.splice(boundary + 1, 0, TABLE_CELL_W);
         this.colAlign.splice(boundary + 1, 0, null);
+        this.mergesAfterInsert("col", boundary + 1);
       } else {
         this.cells.splice(boundary + 1, 0, this.cells[0].map(() => ""));
         this.rowH.splice(boundary + 1, 0, TABLE_CELL_H);
+        this.mergesAfterInsert("row", boundary + 1);
       }
       this.save();
     });
@@ -477,9 +626,9 @@ class TableWidget {
     const line = this.insertLineEl;
     if (!t || !line) return;
     if (axis === "col") {
-      const cell = t.rows[0] && t.rows[0].cells[boundary];
-      if (!cell) return;
-      line.style.left = `${cell.offsetLeft + cell.offsetWidth - 1.5}px`;
+      const geo = this.colBounds();
+      if (!geo.widths.length) return;
+      line.style.left = `${geo.lefts[boundary] + geo.widths[boundary] - 1.5}px`;
       line.style.top = "0px";
       line.style.width = "3px";
       line.style.height = `${t.offsetHeight}px`;
@@ -507,13 +656,16 @@ class TableWidget {
     });
   }
 
-  /** Position the +/reorder/divider chrome from measured cell geometry. */
+  /** Position the +/reorder/divider chrome from measured geometry. Columns
+   *  come from the stored widths (row 0 may hold merged cells, so DOM cells
+   *  don't line up with columns); rows come from the rendered <tr> boxes. */
   layout() {
     const t = this.tableEl;
     if (!t || !t.isConnected) return;
     if (this.cellSel) this.positionCellSelBox();
     const tw = t.offsetWidth;
     const th = t.offsetHeight;
+    const geo = this.colBounds();
     if (this.addColEl) {
       this.addColEl.style.left = `${tw + 6}px`;
       this.addColEl.style.top = "0px";
@@ -524,18 +676,15 @@ class TableWidget {
       this.addRowEl.style.left = "0px";
       this.addRowEl.style.width = `${tw}px`;
     }
-    const first = t.rows[0];
     this.colHandles.forEach((h, i) => {
-      const cell = first && first.cells[i];
-      if (cell) h.style.left = `${cell.offsetLeft + cell.offsetWidth / 2}px`;
+      if (geo.widths[i] == null) return;
+      h.style.left = `${geo.lefts[i] + geo.widths[i] / 2}px`;
     });
     this.colDividers.forEach((d, i) => {
-      const cell = first && first.cells[i];
-      if (cell) {
-        d.style.left = `${cell.offsetLeft + cell.offsetWidth - 3}px`;
-        d.style.top = "0px";
-        d.style.height = `${th}px`;
-      }
+      if (geo.widths[i] == null) return;
+      d.style.left = `${geo.lefts[i] + geo.widths[i] - 3}px`;
+      d.style.top = "0px";
+      d.style.height = `${th}px`;
     });
     this.rowHandles.forEach((h, r) => {
       const tr = t.rows[r];
@@ -550,11 +699,9 @@ class TableWidget {
       }
     });
     this.insertColDots.forEach((d, i) => {
-      const cell = first && first.cells[i];
-      if (cell) {
-        d.style.left = `${cell.offsetLeft + cell.offsetWidth}px`;
-        d.style.top = "-12px";
-      }
+      if (geo.widths[i] == null) return;
+      d.style.left = `${geo.lefts[i] + geo.widths[i]}px`;
+      d.style.top = "-12px";
     });
     this.insertRowDots.forEach((d, r) => {
       const tr = t.rows[r];
@@ -594,6 +741,148 @@ class TableWidget {
       div.addEventListener("pointermove", onMove);
       div.addEventListener("pointerup", onUp, { once: true });
     });
+  }
+
+  // --- merged cells ---
+  /** Sort regions into reading order so the stored comment stays stable, and
+   *  guard the invariant that every region fits the current table. */
+  sortMerges() {
+    const rows = this.cells.length;
+    const cols = (this.cells[0] && this.cells[0].length) || 0;
+    this.merges = this.merges.filter(
+      (m) =>
+        m.rs >= 1 &&
+        m.cs >= 1 &&
+        m.r >= 0 &&
+        m.c >= 0 &&
+        m.r + m.rs <= rows &&
+        m.c + m.cs <= cols &&
+        (m.rs > 1 || m.cs > 1)
+    );
+    this.merges.sort((a, b) => a.r - b.r || a.c - b.c || b.rs - a.rs || b.cs - a.cs);
+    this.buildMergeIndex();
+  }
+
+  /** Merge the current cell selection into one cell. Content of every cell in
+   *  the block is kept, in reading order, one line each, in the top-left cell;
+   *  the cells it covers are blanked (markdown has nowhere else to put them). */
+  mergeSelection() {
+    if (!this.cellSel) return;
+    const { rA, rB, cA, cB } = this.selRect();
+    if (rA === rB && cA === cB) return;
+    this.flushEdit();
+    const target = { r: rA, c: cA, rs: rB - rA + 1, cs: cB - cA + 1 };
+    const parts = [];
+    for (let r = rA; r <= rB; r++) {
+      for (let c = cA; c <= cB; c++) {
+        const text = (this.cells[r][c] || "").trim();
+        if (text) parts.push(text);
+      }
+    }
+    // Overlapping merges are dissolved first; their text is part of `parts`.
+    this.merges = this.merges.filter((m) => !rectsOverlap(m, target));
+    for (let r = rA; r <= rB; r++) {
+      for (let c = cA; c <= cB; c++) this.cells[r][c] = "";
+    }
+    this.cells[rA][cA] = parts.join("\n");
+    this.merges.push(target);
+    this.sortMerges();
+    this.clearCellSelection();
+    this.dirty = true;
+    this.save();
+  }
+
+  /** Split the merged region whose origin is (r, c). Its text stays in the
+   *  top-left cell; the cells that were covered stay empty. */
+  unmergeAt(r, c) {
+    const m = this.mergeFor(r, c);
+    if (!m || (m.rs === 1 && m.cs === 1)) return;
+    this.flushEdit();
+    this.merges = this.merges.filter((x) => x !== m);
+    this.sortMerges();
+    this.clearCellSelection();
+    this.dirty = true;
+    this.save();
+  }
+
+  /** A line was inserted before index `at`: shift regions after it and grow
+   *  any region the new line was inserted into. */
+  mergesAfterInsert(axis, at) {
+    const isCol = axis === "col";
+    for (const m of this.merges) {
+      const start = isCol ? m.c : m.r;
+      const len = isCol ? m.cs : m.rs;
+      if (start >= at) {
+        if (isCol) m.c++;
+        else m.r++;
+      } else if (start + len > at) {
+        if (isCol) m.cs++;
+        else m.rs++;
+      }
+    }
+    this.sortMerges();
+  }
+
+  /** A line at `index` was deleted: move/shrink regions and drop the ones
+   *  that collapse to a single cell. */
+  mergesAfterDelete(axis, index) {
+    const isCol = axis === "col";
+    const next = [];
+    for (const m of this.merges) {
+      const key = isCol ? "c" : "r";
+      const lenKey = isCol ? "cs" : "rs";
+      const start = m[key];
+      const len = m[lenKey];
+      if (len === 1) {
+        // One line thick on this axis: the deleted line either takes the whole
+        // region with it (its text lived on that line) or lies outside it.
+        if (index === start) continue;
+        if (index < start) m[key]--;
+        next.push(m);
+      } else if (index < start) {
+        m[key]--;
+        next.push(m);
+      } else if (index < start + len) {
+        m[lenKey]--;
+        if (m.rs > 1 || m.cs > 1) next.push(m);
+      } else {
+        next.push(m);
+      }
+    }
+    this.merges = next;
+    this.sortMerges();
+  }
+
+  /** A row/column was dragged from `from` to `to`: keep regions that still
+   *  describe a contiguous rectangle after the move, drop the rest. */
+  mergesAfterMove(axis, from, to) {
+    const isCol = axis === "col";
+    const next = [];
+    for (const m of this.merges) {
+      const key = isCol ? "c" : "r";
+      const lenKey = isCol ? "cs" : "rs";
+      const start = m[key];
+      const len = m[lenKey];
+      if (len === 1) {
+        m[key] = movePos(start, from, to);
+        next.push(m);
+        continue;
+      }
+      // Moving a line out of the middle of a region, or dropping a line into
+      // it, can't stay rectangular.
+      if (from >= start && from < start + len) continue;
+      const positions = [];
+      for (let i = start; i < start + len; i++) positions.push(movePos(i, from, to));
+      let contiguous = true;
+      for (let i = 1; i < positions.length; i++) {
+        if (positions[i] !== positions[0] + i) contiguous = false;
+      }
+      if (!contiguous) continue;
+      m[key] = positions[0];
+      next.push(m);
+    }
+    this.merges = next;
+    this.sortMerges();
   }
 
   // --- cell editing ---
@@ -656,8 +945,9 @@ class TableWidget {
       this.refreshInternalLinkSuggest(td);
       window.requestAnimationFrame(() => this.layout());
     });
-    // Right-click a cell → set its column's text alignment (markdown only
-    // supports per-column alignment, so this applies to the whole column).
+    // Right-click a cell → merge/split plus the column's text alignment
+    // (markdown only supports per-column alignment, so that applies to the
+    // whole column).
     td.addEventListener("contextmenu", (e) => {
       if (this.editingCell) {
         // A cell is being edited → Obsidian shows its native editor menu. Flag
@@ -674,11 +964,29 @@ class TableWidget {
       if (this.cellInSelection(r, c)) {
         menu.addItem((i) => i.setTitle("Copy").setIcon("copy").onClick(() => this.copyCellSelection()));
         menu.addItem((i) => i.setTitle("Clear contents").setIcon("eraser").onClick(() => this.clearSelectedCells()));
+        const { rA, rB, cA, cB } = this.selRect();
+        if (rA !== rB || cA !== cB) {
+          menu.addSeparator();
+          menu.addItem((i) =>
+            i.setTitle("Merge cells").setIcon("combine").onClick(() => this.mergeSelection())
+          );
+        }
         menu.addSeparator();
         // Align every column the selection spans, not just the one clicked.
-        const { cA, cB } = this.selRect();
         cols = [];
         for (let ci = cA; ci <= cB; ci++) cols.push(ci);
+      }
+      // A merged cell offers to split back into its grid cells.
+      const merged = this.mergeFor(r, c);
+      if (merged && (merged.rs > 1 || merged.cs > 1)) {
+        if (!this.cellInSelection(r, c)) menu.addSeparator();
+        menu.addItem((i) =>
+          i
+            .setTitle(merged.rs > 1 && merged.cs > 1 ? "Split into cells" : "Unmerge cells")
+            .setIcon("split")
+            .onClick(() => this.unmergeAt(merged.r, merged.c))
+        );
+        menu.addSeparator();
       }
       this.addAlignItems(menu, cols);
       menu.showAtMouseEvent(e);
@@ -772,15 +1080,17 @@ class TableWidget {
     this.doc.addEventListener("mouseup", onUp, true);
   }
 
-  /** Hit-test a viewport point to the cell under it, or null. */
+  /** Hit-test a viewport point to the cell under it, or null. A merged cell
+   *  reports its origin position. */
   cellAtPoint(x, y) {
     const t = this.tableEl;
     if (!t) return null;
-    for (let ri = 0; ri < t.rows.length; ri++) {
-      const row = t.rows[ri];
-      for (let ci = 0; ci < row.cells.length; ci++) {
-        const rect = row.cells[ci].getBoundingClientRect();
-        if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) return { r: ri, c: ci };
+    for (const tr of Array.from(t.rows)) {
+      for (const td of Array.from(tr.cells)) {
+        const rect = td.getBoundingClientRect();
+        if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+          return { r: td._btR, c: td._btC };
+        }
       }
     }
     return null;
@@ -804,13 +1114,25 @@ class TableWidget {
       } else if ((ev.metaKey || ev.ctrlKey) && (ev.key === "c" || ev.key === "C")) {
         ev.preventDefault();
         this.copyCellSelection();
+      } else if (ev.altKey && (ev.key === "m" || ev.key === "M")) {
+        // Alt+M merges the selection; Alt+Shift+M splits the anchor's cell.
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (ev.shiftKey) {
+          const { r0, c0 } = this.cellSel;
+          const m = this.mergeFor(r0, c0);
+          if (m) this.unmergeAt(m.r, m.c);
+        } else {
+          this.mergeSelection();
+        }
       } else if (ev.key === "Enter" || ev.key === "F2") {
         // Edit the selection's anchor cell, caret at the end.
         ev.preventDefault();
         ev.stopPropagation();
         const { r0, c0 } = this.cellSel;
-        const td = this.tableEl.rows[r0] && this.tableEl.rows[r0].cells[c0];
-        if (td) this.editCell(td, r0, c0, true);
+        const o = this.originOf(r0, c0);
+        const td = this.tdAt(o.r, o.c);
+        if (td) this.editCell(td, o.r, o.c, true);
       } else if (ev.key.length === 1 && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
         // Type-to-edit: typing on a selected cell starts editing and REPLACES
         // its content (spreadsheet behavior). Empty the cell and let the
@@ -819,9 +1141,10 @@ class TableWidget {
         // focus and left it before the first letter).
         ev.stopPropagation();
         const { r0, c0 } = this.cellSel;
-        const td = this.tableEl.rows[r0] && this.tableEl.rows[r0].cells[c0];
+        const o = this.originOf(r0, c0);
+        const td = this.tdAt(o.r, o.c);
         if (!td) return;
-        this.editCell(td, r0, c0, true);
+        this.editCell(td, o.r, o.c, true);
         td.setText("");
       }
     };
@@ -856,10 +1179,15 @@ class TableWidget {
       return;
     }
     const { rA, rB, cA, cB } = this.selRect();
+    const hit = new Set();
     for (let ri = rA; ri <= rB; ri++) {
       for (let ci = cA; ci <= cB; ci++) {
-        const cell = t.rows[ri] && t.rows[ri].cells[ci];
-        if (cell) cell.addClass("cp-cell-selected");
+        // A merged cell paints several grid positions; highlight it once.
+        const cell = this.tdAt(ri, ci);
+        if (cell && !hit.has(cell)) {
+          hit.add(cell);
+          cell.addClass("cp-cell-selected");
+        }
       }
     }
     this.positionCellSelBox();
@@ -867,7 +1195,8 @@ class TableWidget {
 
   /** Draw the selection outline as one overlay rectangle above the grid, so the
    *  cells' own borders can't paint over it (an inset box-shadow would sit under
-   *  those borders). Sized from the block's corner cells. */
+   *  those borders). Sized from the grid geometry so merged cells — which have
+   *  no DOM cell of their own — are framed correctly too. */
   positionCellSelBox() {
     if (!this.cellSel) {
       if (this.cellSelBox) this.cellSelBox.style.display = "none";
@@ -875,21 +1204,27 @@ class TableWidget {
     }
     const t = this.tableEl;
     if (!t) return;
+    const rowA = t.rows[this.selRect().rA];
+    const rowB = t.rows[this.selRect().rB];
+    if (!rowA || !rowB) return;
     if (!this.cellSelBox) {
       this.cellSelBox = this.rootEl.createDiv({ cls: "cp-cell-selbox" });
     }
     const { rA, rB, cA, cB } = this.selRect();
-    const a = t.rows[rA] && t.rows[rA].cells[cA];
-    const b = t.rows[rB] && t.rows[rB].cells[cB];
-    if (!a || !b) {
+    const geo = this.colBounds();
+    if (geo.widths[cA] == null || geo.widths[cB] == null) {
       this.cellSelBox.style.display = "none";
       return;
     }
+    const left = geo.lefts[cA];
+    const top = rowA.offsetTop;
+    const width = geo.lefts[cB] + geo.widths[cB] - left;
+    const height = rowB.offsetTop + rowB.offsetHeight - top;
     this.cellSelBox.style.display = "block";
-    this.cellSelBox.style.left = `${a.offsetLeft}px`;
-    this.cellSelBox.style.top = `${a.offsetTop}px`;
-    this.cellSelBox.style.width = `${b.offsetLeft + b.offsetWidth - a.offsetLeft}px`;
-    this.cellSelBox.style.height = `${b.offsetTop + b.offsetHeight - a.offsetTop}px`;
+    this.cellSelBox.style.left = `${left}px`;
+    this.cellSelBox.style.top = `${top}px`;
+    this.cellSelBox.style.width = `${width}px`;
+    this.cellSelBox.style.height = `${height}px`;
   }
 
   clearCellSelection() {
@@ -1201,7 +1536,9 @@ class TableWidget {
           td.blur();
         } else if (e.key === "Tab") {
           e.preventDefault();
-          const lastCell = r === this.cells.length - 1 && c === this.cells[0].length - 1;
+          // "Last cell" means the bottom-right corner of the grid; a merged
+          // cell may cover it, so compare against the grid, not the DOM.
+          const lastCell = r === this.cells.length - 1 && (c + (this.mergeFor(r, c) ? this.mergeFor(r, c).cs : 1) - 1 === this.cells[0].length - 1);
           // Tab off the bottom-right cell grows the table and continues in the
           // new row's first cell, so you can fill a table without reaching for
           // the mouse.
@@ -1211,7 +1548,9 @@ class TableWidget {
           e.preventDefault();
           // Enter on the last row grows the table and keeps editing in the new
           // row, so you can keep typing down the column.
-          if (r === this.cells.length - 1) this.appendRowAndEdit(c);
+          const origin = this.originOf(r, c);
+          const endsOnLastRow = origin.r + (this.mergeFor(r, c) ? this.mergeFor(r, c).rs : 1) - 1 === this.cells.length - 1;
+          if (endsOnLastRow) this.appendRowAndEdit(c);
           else this.editNeighbor(r, c, 1, 0);
         } else if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown") {
           // Arrows move the caret within the cell until it hits an edge, then
@@ -1235,23 +1574,34 @@ class TableWidget {
     }
   }
 
-  /** Move to an adjacent cell. Commits the current cell into the model WITHOUT
-   *  saving (so no file write / re-render happens mid-navigation, which would
-   *  tear down the DOM). When `eject` is set, navigating past the table edge
-   *  commits + persists and exits; otherwise it's a no-op (stay in the cell). */
+  /** Move to an adjacent cell, skipping positions covered by a merged cell.
+   *  Commits the current cell into the model WITHOUT saving (so no file write /
+   *  re-render happens mid-navigation, which would tear down the DOM). When
+   *  `eject` is set, navigating past the table edge commits + persists and
+   *  exits; otherwise it's a no-op (stay in the cell). */
   editNeighbor(r, c, dr, dc, eject = false) {
-    let nr = r + dr;
-    let nc = c + dc;
-    if (nc >= this.cells[0].length) {
-      nc = 0;
-      nr++;
+    const rows = this.cells.length;
+    const cols = this.cells[0].length;
+    let nr = r;
+    let nc = c;
+    let found = false;
+    for (let step = 0; step < rows * cols; step++) {
+      nc += dc;
+      nr += dr;
+      if (nc >= cols) {
+        nc = 0;
+        nr++;
+      } else if (nc < 0) {
+        nc = cols - 1;
+        nr--;
+      }
+      if (nr < 0 || nr >= rows) break;
+      if (!this.isCovered(nr, nc)) {
+        found = true;
+        break;
+      }
     }
-    if (nc < 0) {
-      nc = this.cells[0].length - 1;
-      nr--;
-    }
-    const table = this.el.querySelector(".cp-table");
-    const td = nr >= 0 && nr < this.cells.length && table && table.rows[nr] && table.rows[nr].cells[nc];
+    const td = found ? this.tdAt(nr, nc) : null;
     if (td) {
       this.editCell(td, nr, nc, true);
     } else if (eject) {
@@ -1272,10 +1622,15 @@ class TableWidget {
     this.rowH.push(TABLE_CELL_H);
     this.dirty = true;
     const tr = this.tableEl.createEl("tr");
+    const rowMap = this.cells[0].map(() => null);
     this.cells[nr].forEach((text, c) => {
       const td = tr.createEl("td");
+      td._btR = nr;
+      td._btC = c;
+      rowMap[c] = td;
       this.bindCell(td, nr, c, text);
     });
+    this.tdMap[nr] = rowMap;
     this.applySizes();
     const td = tr.cells[col];
     if (td) this.editCell(td, nr, col, true);
@@ -1417,7 +1772,7 @@ class TableWidget {
         if (axis === "row") {
           table.rows[index] && table.rows[index].toggleClass("cp-drag-src", on);
         } else {
-          for (const row of Array.from(table.rows)) row.cells[index] && row.cells[index].toggleClass("cp-drag-src", on);
+          this.colCells(index).forEach((td) => td.toggleClass("cp-drag-src", on));
         }
       };
       const moveGhost = (ev) => {
@@ -1454,7 +1809,7 @@ class TableWidget {
         if (axis === "row") {
           table.rows[target] && table.rows[target].addClass("cp-drop-target");
         } else {
-          for (const row of Array.from(table.rows)) row.cells[target] && row.cells[target].addClass("cp-drop-target");
+          this.colCells(target).forEach((td) => td.addClass("cp-drop-target"));
         }
       };
       const onUp = () => {
@@ -1472,6 +1827,7 @@ class TableWidget {
         ghost && ghost.remove();
         setSrc(false);
         if (target !== index) {
+          this.flushEdit();
           if (axis === "row") {
             const [row] = this.cells.splice(index, 1);
             this.cells.splice(target, 0, row);
@@ -1487,6 +1843,7 @@ class TableWidget {
             const [al] = this.colAlign.splice(index, 1);
             this.colAlign.splice(target, 0, al);
           }
+          this.mergesAfterMove(axis, index, target);
           this.save();
         } else {
           this.render();
@@ -1534,11 +1891,26 @@ class TableWidget {
     this.doc.addEventListener("keydown", this.lineSelKey, true);
   }
 
+  /** The distinct <td>s painting a grid column (merges make DOM cells span
+   *  several columns, so a column can be painted by fewer cells). */
+  colCells(index) {
+    const out = [];
+    const seen = new Set();
+    for (let r = 0; r < this.cells.length; r++) {
+      const td = this.tdAt(r, index);
+      if (td && !seen.has(td)) {
+        seen.add(td);
+        out.push(td);
+      }
+    }
+    return out;
+  }
+
   lineCells(axis, index) {
     const table = this.tableEl;
     if (!table) return [];
     if (axis === "row") return Array.from((table.rows[index] && table.rows[index].cells) || []);
-    return Array.from(table.rows).map((r) => r.cells[index]).filter(Boolean);
+    return this.colCells(index);
   }
 
   positionDeleteBtn() {
@@ -1583,6 +1955,14 @@ class TableWidget {
       new Notice("Better Tables: a table needs at least one row and column.");
       return;
     }
+    this.flushEdit();
+    // Deleting the line a merged cell starts on shouldn't swallow its text:
+    // move it to the first cell the region keeps.
+    const keep = [];
+    for (const m of this.merges) {
+      if (axis === "row" && m.r === index && m.rs > 1) keep.push({ m, text: this.cells[m.r][m.c] });
+      if (axis === "col" && m.c === index && m.cs > 1) keep.push({ m, text: this.cells[m.r][m.c] });
+    }
     if (axis === "row") {
       this.cells.splice(index, 1);
       this.rowH.splice(index, 1);
@@ -1590,6 +1970,12 @@ class TableWidget {
       for (const row of this.cells) row.splice(index, 1);
       this.colW.splice(index, 1);
       this.colAlign.splice(index, 1);
+    }
+    this.mergesAfterDelete(axis, index);
+    for (const { m, text } of keep) {
+      if (!this.merges.includes(m)) continue;
+      const cell = this.cells[m.r] && this.cells[m.r][m.c];
+      if (cell === "") this.cells[m.r][m.c] = text;
     }
     this.clearLineSelection();
     this.save();
@@ -1665,15 +2051,16 @@ class TableWidget {
       tr.style.height = `${(src && src.offsetHeight) || TABLE_CELL_H}px`;
       g.style.width = `${t.offsetWidth}px`;
     } else {
-      Array.from(t.rows).forEach((row) => {
-        const cell = row.cells[index];
+      const geo = this.colBounds();
+      const colW = geo.widths[index] || TABLE_CELL_W;
+      Array.from(t.rows).forEach((row, r) => {
         const tr = gt.createEl("tr");
         const td = tr.createEl("td");
-        td.setText((cell && cell.textContent) || "");
-        td.style.width = `${(cell && cell.offsetWidth) || TABLE_CELL_W}px`;
+        td.setText(this.cells[r][index] || "");
+        td.style.width = `${colW}px`;
         tr.style.height = `${row.offsetHeight}px`;
       });
-      g.style.width = `${(t.rows[0] && t.rows[0].cells[index] && t.rows[0].cells[index].offsetWidth) || TABLE_CELL_W}px`;
+      g.style.width = `${colW}px`;
     }
     gt.style.width = "100%";
     return g;
@@ -1682,8 +2069,13 @@ class TableWidget {
   // --- persistence: write the block back into the note file ---
   serialize() {
     const md = mdFromCells(this.cells, this.colAlign);
-    const sizeLine = `<!-- tk:cols=${this.colW.join(",")};rows=${this.rowH.join(",")} -->`;
-    return `${md}\n${sizeLine}`;
+    let meta = `<!-- tk:cols=${this.colW.join(",")};rows=${this.rowH.join(",")}`;
+    if (this.merges.length) {
+      const regions = this.merges.map((m) => `${m.r},${m.c},${m.rs},${m.cs}`).join("|");
+      meta += `;merge=${regions}`;
+    }
+    meta += " -->";
+    return `${md}\n${meta}`;
   }
 
   save() {

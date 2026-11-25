@@ -9,6 +9,7 @@ If you are frustrated with making tables in your notes, install this. Summon the
 - **Move around with the keyboard.** Use the arrow keys, or `Tab` and `Enter`.
 - **Press `Enter` on a selected cell** to start editing it.
 - **Drag across cells** to select a block. Then copy it, or press `Delete` to clear it.
+- **Merge cells.** Select a block of cells and right-click → **Merge cells** (or press `Alt+M`). Right-click a merged cell → **Unmerge cells** (or `Alt+Shift+M`).
 - **Drag the lines** between rows and columns to resize them.
 - **Drag the handles** on the top and left edges to reorder rows and columns.
 - **Hover between cells** and click the dot to insert a row or column.
@@ -34,6 +35,26 @@ Go to the next line, you'd summoned you interactive table.
 3. If you have ````slash commander```` core plugin installed, you can use ````/better tables````
 
 Your table is saved as a normal Markdown table, so it still works everywhere else. Column widths and row heights are kept in a small hidden comment inside the block (e.g. `<!-- tk:cols=140,140;rows=48,48 -->`).
+
+### Merged cells
+
+Markdown has no `colspan`/`rowspan`, so merged cells are stored in that same hidden comment and painted by the plugin:
+
+````
+```table
+| Quarterly totals |     | Q1 | Q2 |
+| --- | --- | --- | --- |
+| North | Ann | 60 | 70 |
+| South | Bob | 60 | 60 |
+<!-- tk:cols=140,140;rows=48,48,48;merge=0,0,1,2 -->
+```
+````
+
+- Each `merge=` entry is `row,column,rowSpan,colSpan` (0-based), separated by `|`.
+- The top-left cell holds the text; every cell it covers is written as an empty cell, so the block stays a valid, readable Markdown table elsewhere. No information is hidden: merging joins the text of the selected cells into the top-left cell, one line per cell.
+- If you type text into a cell that a merge covers (in source mode), that merge is ignored rather than hiding the text; merge again to restore it.
+- Merging, unmerging, inserting/deleting rows and columns, and reordering with the handles all keep the regions valid. A reorder that would tear a merged region apart simply unmerges it.
+- Merged regions can't overlap: merging over an existing merge replaces it.
 
 ## Settings
 If you like to immediately select & edit text (bypassing having to select the cell first), you can turn on ````Quick text edit```` in the setting.
