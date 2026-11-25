@@ -116,6 +116,167 @@
 	max-width: 100%;
 }
 
+/* Hover zoom control on images inside a cell. The frame only wraps plain
+   images; Obsidian embeds keep their markup and get the button appended. */
+.cp-img-frame {
+	position: relative;
+	display: inline-block;
+	max-width: 100%;
+	line-height: 0;
+	vertical-align: bottom;
+}
+
+.cp-img-frame > img {
+	display: block;
+	max-width: 100%;
+	height: auto;
+}
+
+.cp-img-zoom {
+	position: absolute;
+	top: 6px;
+	right: 6px;
+	z-index: 2;
+	width: 26px;
+	height: 26px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: var(--radius-s);
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	box-shadow: var(--shadow-s);
+	color: var(--text-muted);
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 120ms ease, color 120ms ease, background 120ms ease;
+}
+
+.cp-img-host:hover > .cp-img-zoom,
+.cp-img-host:focus-within > .cp-img-zoom,
+.cp-img-zoom:focus-visible {
+	opacity: 1;
+}
+
+.cp-img-zoom:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.cp-img-zoom svg {
+	width: 15px;
+	height: 15px;
+}
+
+/* Touch devices have no hover: keep the control visible. */
+@media (hover: none) {
+	.cp-img-zoom {
+		opacity: 1;
+	}
+}
+
+/* Full-screen image viewer opened from the zoom control. */
+.bt-zoom-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: var(--layer-modal, 50);
+	background: rgba(0, 0, 0, 0.85);
+	display: block;
+	overflow: hidden;
+	outline: none;
+}
+
+.bt-zoom-stage {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	overflow: hidden;
+	cursor: zoom-in;
+	touch-action: none;
+}
+
+.bt-zoom-stage.is-zoomed {
+	cursor: grab;
+}
+
+.bt-zoom-stage.is-panning {
+	cursor: grabbing;
+}
+
+.bt-zoom-image {
+	max-width: 92vw;
+	max-height: 88vh;
+	user-select: none;
+	-webkit-user-drag: none;
+	border-radius: var(--radius-s);
+	box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+	transform-origin: center center;
+	will-change: transform;
+}
+
+.bt-zoom-bar {
+	position: absolute;
+	top: 16px;
+	right: 16px;
+	z-index: 2;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 5px;
+	border-radius: var(--radius-m);
+	background: var(--background-primary);
+	box-shadow: var(--shadow-l);
+}
+
+.bt-zoom-btn {
+	width: 30px;
+	height: 30px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: var(--radius-s);
+	color: var(--text-muted);
+	cursor: pointer;
+}
+
+.bt-zoom-btn:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.bt-zoom-btn svg {
+	width: 17px;
+	height: 17px;
+}
+
+.bt-zoom-level {
+	min-width: 52px;
+	padding: 0 4px;
+	text-align: center;
+	font-family: var(--font-monospace, monospace);
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	cursor: pointer;
+	border-radius: var(--radius-s);
+	line-height: 30px;
+}
+
+.bt-zoom-level:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+@media (max-width: 480px) {
+	.bt-zoom-bar {
+		top: auto;
+		bottom: 16px;
+		right: 50%;
+		transform: translateX(50%);
+	}
+}
+
 .better-tables-link-suggest {
 	position: fixed;
 	z-index: var(--layer-popover, 30);

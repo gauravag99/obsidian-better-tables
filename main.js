@@ -305,6 +305,9 @@ class TableWidget {
     // dataview, etc.) so they unload when the widget re-renders or tears down,
     // instead of leaking onto the plugin for its whole lifetime.
     this.mdComponent = null;
+    // Full-screen image viewer opened from a cell image (one at a time).
+    this.zoomEl = null;
+    this.zoomClose = null;
   }
 
   get doc() {
@@ -314,6 +317,7 @@ class TableWidget {
   /** Tear down everything this widget owns. Called when Obsidian unloads the
    *  block (re-render, view close, plugin unload) via the render child below. */
   destroy() {
+    this.closeImageZoom();
     if (this.resizeObs) {
       this.resizeObs.disconnect();
       this.resizeObs = null;
@@ -1294,6 +1298,297 @@ class TableWidget {
     window.requestAnimationFrame(() => this.layout());
   }
 
+  // --- image zoom ---
+  /** Give every image in a cell a hover "zoom" affordance. Works for Obsidian
+   *  embeds (the button is added inside the embed, so plugin CSS and their own
+   *  overlays keep working) and for plain images, which get a small frame. */
+  decorateCellImages(td) {
+    if (!td || !td.isConnected) return;
+    const images = Array.from(td.querySelectorAll(".cp-cell-markdown img"));
+    for (const img of images) {
+      if (!img.isConnected || img.closest(".cp-img-zoom")) continue;
+      // Plugin toolbar icons and other tiny decorations don't need a viewer.
+      const box = img.getBoundingClientRect();
+      if (box.width > 0 && box.height > 0 && box.width < 24 && box.height < 24) continue;
+      const host = this.zoomHostFor(img);
+      if (!host) continue;
+      if (host.querySelector(":scope > .cp-img-zoom")) continue;
+      const style = (this.doc.defaultView || window).getComputedStyle(host);
+      if (style.position === "static") host.style.position = "relative";
+      host.classList.add("cp-img-host");
+      const btn = this.doc.createElement("div");
+      btn.className = "cp-img-zoom clickable-icon";
+      btn.setAttribute("role", "button");
+      btn.setAttribute("tabindex", "0");
+      btn.setAttribute("aria-label", "Zoom image");
+      setIcon(btn, "zoom-in");
+      const open = (evt) => {
+        evt.preventDefault();
+        evt.stopPropagation();
+        this.openImageZoom(img, btn);
+      };
+      btn.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.clearCellSelection();
+        this.clearLineSelection();
+      });
+      btn.addEventListener("pointerdown", (e) => e.stopPropagation());
+      btn.addEventListener("click", open);
+      btn.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          this.openImageZoom(img, btn);
+        }
+      });
+      host.appendChild(btn);
+    }
+  }
+
+  /** The element the zoom button is anchored to. Embeds keep their own markup
+   *  (their direct-child CSS and overlays stay intact); bare images get a small
+   *  inline frame. */
+  zoomHostFor(img) {
+    const embed = img.closest(".internal-embed, .image-embed, .media-embed");
+    if (embed) return embed;
+    const parent = img.parentElement;
+    if (!parent) return null;
+    if (parent.classList && parent.classList.contains("cp-img-frame")) return parent;
+    const frame = this.doc.createElement("span");
+    frame.className = "cp-img-frame";
+    try {
+      parent.insertBefore(frame, img);
+    } catch {
+      return null;
+    }
+    frame.appendChild(img);
+    return frame;
+  }
+
+  /** Full-screen viewer for a cell image. Zoom and pan are temporary: the note
+   *  and the cell's markdown are never touched. */
+  openImageZoom(img, opener) {
+    const src = img.currentSrc || img.getAttribute("src") || "";
+    if (!src) return;
+    this.closeImageZoom();
+    this.clearCellSelection();
+    this.clearLineSelection();
+
+    const doc = this.doc;
+    const body = doc.body;
+    const overlay = doc.createElement("div");
+    overlay.className = "bt-zoom-overlay";
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-label", "Image preview");
+    overlay.tabIndex = -1;
+
+    const stage = doc.createElement("div");
+    stage.className = "bt-zoom-stage";
+    const image = doc.createElement("img");
+    image.className = "bt-zoom-image";
+    image.src = src;
+    image.alt = img.getAttribute("alt") || "";
+    image.draggable = false;
+    stage.appendChild(image);
+    overlay.appendChild(stage);
+
+    const bar = doc.createElement("div");
+    bar.className = "bt-zoom-bar";
+    overlay.appendChild(bar);
+
+    const MIN = 0.25;
+    const MAX = 8;
+    let scale = 1;
+    let tx = 0;
+    let ty = 0;
+
+    const level = doc.createElement("div");
+    level.className = "bt-zoom-level";
+    level.setAttribute("role", "button");
+    level.setAttribute("tabindex", "0");
+    level.setAttribute("aria-label", "Reset zoom");
+    const apply = () => {
+      image.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+      level.textContent = `${Math.round(scale * 100)}%`;
+      stage.classList.toggle("is-zoomed", scale > 1.001);
+    };
+    const clampPan = () => {
+      const sw = stage.clientWidth || 0;
+      const sh = stage.clientHeight || 0;
+      const iw = image.offsetWidth || 0;
+      const ih = image.offsetHeight || 0;
+      const slack = scale > 1.001 ? 24 : 0;
+      const maxX = Math.max(0, (iw * scale - sw) / 2) + slack;
+      const maxY = Math.max(0, (ih * scale - sh) / 2) + slack;
+      tx = Math.max(-maxX, Math.min(maxX, tx));
+      ty = Math.max(-maxY, Math.min(maxY, ty));
+    };
+    const setZoom = (value, cx, cy) => {
+      const next = Math.max(MIN, Math.min(MAX, value));
+      if (next === scale) return;
+      if (cx != null && cy != null) {
+        // Keep the point under the cursor fixed.
+        const ratio = next / scale;
+        tx = cx - (cx - tx) * ratio;
+        ty = cy - (cy - ty) * ratio;
+      }
+      scale = next;
+      clampPan();
+      apply();
+    };
+    const resetView = () => {
+      scale = 1;
+      tx = 0;
+      ty = 0;
+      apply();
+    };
+
+    const mkBtn = (icon, label, handler) => {
+      const btn = doc.createElement("div");
+      btn.className = "bt-zoom-btn clickable-icon";
+      btn.setAttribute("role", "button");
+      btn.setAttribute("tabindex", "0");
+      btn.setAttribute("aria-label", label);
+      setIcon(btn, icon);
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        handler();
+      });
+      btn.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          handler();
+        }
+      });
+      bar.appendChild(btn);
+      return btn;
+    };
+    mkBtn("zoom-out", "Zoom out", () => setZoom(scale / 1.25));
+    bar.appendChild(level);
+    mkBtn("zoom-in", "Zoom in", () => setZoom(scale * 1.25));
+    mkBtn("x", "Close", () => close());
+
+    const onLevel = () => resetView();
+    level.addEventListener("click", onLevel);
+    level.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        resetView();
+      }
+    });
+
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        close();
+      } else if (e.key === "+" || e.key === "=") {
+        e.preventDefault();
+        setZoom(scale * 1.25);
+      } else if (e.key === "-" || e.key === "_") {
+        e.preventDefault();
+        setZoom(scale / 1.25);
+      } else if (e.key === "0") {
+        e.preventDefault();
+        resetView();
+      }
+    };
+    overlay.addEventListener("keydown", onKey);
+    // Keep Tab inside the viewer (it is modal).
+    overlay.addEventListener("keydown", (e) => {
+      if (e.key !== "Tab") return;
+      const focusables = Array.from(overlay.querySelectorAll('[tabindex="0"]'));
+      if (!focusables.length) return;
+      const at = focusables.indexOf(doc.activeElement);
+      if (e.shiftKey && at <= 0) {
+        e.preventDefault();
+        focusables[focusables.length - 1].focus();
+      } else if (!e.shiftKey && at === focusables.length - 1) {
+        e.preventDefault();
+        focusables[0].focus();
+      }
+    });
+
+    overlay.addEventListener(
+      "wheel",
+      (e) => {
+        e.preventDefault();
+        const box = stage.getBoundingClientRect();
+        setZoom(scale * Math.exp(-e.deltaY * 0.0015), e.clientX - (box.left + box.width / 2), e.clientY - (box.top + box.height / 2));
+      },
+      { passive: false }
+    );
+
+    // Drag to pan; a click on the empty stage closes the viewer.
+    let drag = null;
+    stage.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0 || bar.contains(e.target)) return;
+      drag = { id: e.pointerId, x: e.clientX, y: e.clientY, tx, ty, moved: 0 };
+      if (stage.setPointerCapture) {
+        try {
+          stage.setPointerCapture(e.pointerId);
+        } catch {
+          /* not supported */
+        }
+      }
+      stage.classList.add("is-panning");
+      e.preventDefault();
+    });
+    stage.addEventListener("pointermove", (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      const dx = e.clientX - drag.x;
+      const dy = e.clientY - drag.y;
+      drag.moved = Math.max(drag.moved, Math.hypot(dx, dy));
+      tx = drag.tx + dx;
+      ty = drag.ty + dy;
+      clampPan();
+      apply();
+    });
+    const endDrag = (e) => {
+      if (!drag) return;
+      const moved = drag.moved > 4;
+      drag = null;
+      stage.classList.remove("is-panning");
+      if (!moved && (e.target === stage || e.target === overlay)) close();
+    };
+    stage.addEventListener("pointerup", endDrag);
+    stage.addEventListener("pointercancel", () => {
+      drag = null;
+      stage.classList.remove("is-panning");
+    });
+    overlay.addEventListener("pointerdown", (e) => {
+      if (e.target === overlay) close();
+    });
+
+    const prevOverflow = body.style.overflow;
+    const close = () => {
+      if (!overlay.isConnected) return;
+      overlay.remove();
+      body.style.overflow = prevOverflow;
+      if (this.zoomEl === overlay) this.zoomEl = null;
+      this.zoomClose = null;
+      if (opener && opener.isConnected && typeof opener.focus === "function") {
+        opener.focus({ preventScroll: true });
+      }
+    };
+
+    this.zoomEl = overlay;
+    this.zoomClose = close;
+    body.appendChild(overlay);
+    body.style.overflow = "hidden";
+    apply();
+    overlay.focus({ preventScroll: true });
+  }
+
+  closeImageZoom() {
+    const close = this.zoomClose;
+    this.zoomClose = null;
+    this.zoomEl = null;
+    if (close) close();
+  }
+
   // --- cell editing ---
   async renderCellMarkdown(td, text) {
     td._btRawText = text;
@@ -1311,6 +1606,7 @@ class TableWidget {
         await MarkdownRenderer.renderMarkdown(text, target, this.ctx.sourcePath || "", owner);
       }
       if (td._btRenderVersion !== version || this.editingCell === td) return;
+      this.decorateCellImages(td);
       this.layout();
     } catch (err) {
       console.error("Better Tables: cell markdown render failed", err);
@@ -1324,6 +1620,19 @@ class TableWidget {
   bindCell(td, r, c, text) {
     this.renderCellMarkdown(td, text);
     if (r === 0) td.addClass("cp-table-header");
+    // Image zoom works in reading view too, where the listeners below are not
+    // attached: embeds may finish loading after the render resolves, so wire
+    // the lazy decoration here.
+    td.addEventListener("pointerenter", () => {
+      if (this.editingCell !== td) this.decorateCellImages(td);
+    });
+    td.addEventListener("pointerover", (e) => {
+      if (this.editingCell === td) return;
+      const target = e.target;
+      if (!target || target.nodeName !== "IMG" || target.closest(".cp-img-zoom")) return;
+      if (target.closest(".cp-img-host")) return;
+      this.decorateCellImages(td);
+    });
     // Reading view: display-only cell, no editing/selection/align listeners.
     if (this.readOnly) return;
     // Use mousedown (not pointerdown): CodeMirror manages focus on mousedown,

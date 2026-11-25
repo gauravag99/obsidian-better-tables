@@ -11,6 +11,7 @@ If you are frustrated with making tables in your notes, install this. Summon the
 - **Drag across cells** to select a block. Then copy it, or press `Delete` to clear it.
 - **Merge cells.** Select a block of cells and right-click → **Merge cells** (or press `Alt+M`). Right-click a merged cell → **Unmerge cells** (or `Alt+Shift+M`).
 - **Paste a picture into a cell.** It's saved to your attachment folder and embedded; it no longer disappears when you leave the cell. With [Image Converter](https://github.com/xRyul/obsidian-image-converter) installed, pasted images go through its conversion and naming presets first.
+- **Hover an image to zoom it.** A small button appears in the image's corner and opens a full-screen preview you can zoom and pan; the note is never modified.
 - **Drag the lines** between rows and columns to resize them.
 - **Drag the handles** on the top and left edges to reorder rows and columns.
 - **Hover between cells** and click the dot to insert a row or column.
@@ -78,6 +79,17 @@ If you use [Image Converter](https://github.com/xRyul/obsidian-image-converter),
 Its preset-selection modal appears as usual if you configured it to ask. Turn this off in **Settings → Better Tables → Process pasted images with Image Converter** to always save images directly. If the plugin is missing, disabled, processing fails, or the table's note isn't the active file, Better Tables falls back to saving the image itself.
 
 Embeds written by Better Tables are always caption-free; Image Converter's own *image captions* setting, if enabled, still applies to the images it creates.
+
+### Zooming an image
+
+Hovering an image in a cell shows a zoom button in its corner (always visible on touch devices). Click it — or focus it and press `Enter` — to open a full-screen preview:
+
+- zoom with the `+` / `–` buttons, the mouse wheel or trackpad, or the `+` / `-` keys;
+- drag to pan; click the empty background (or press `Esc`, or the ✕ button) to close;
+- click the percentage label or press `0` to go back to fit;
+- the range is 25 %–800 %, and nothing is written to the note — zoom is only for the preview.
+
+The button lives inside the image embed when Obsidian made one, so other image plugins keep their own overlays and CSS intact.
 
 Embeds are written the way Obsidian itself writes them — following your **link format** settings (wikilinks or Markdown links, relative or vault-absolute path) — but with the display text removed: `![[Attachments/photo.webp]]`, or `![](./Attachments/photo.webp)`. Themes and plugins that render alt text as a caption therefore have nothing to show, instead of labelling every picture with its file name.
 
