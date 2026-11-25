@@ -67,7 +67,7 @@ A cell holds Markdown text, so a picture pasted straight from the clipboard is w
 - Plain text, `[[links]]` and existing `![[embeds]]` paste exactly as before.
 - Dropping an image file onto a cell appends it the same way.
 
-Embeds are written **without display text or alt text** — `![[attachments/Pasted image ….png]]`, or `![](attachments/Pasted%20image….png)` if you use Markdown links. Themes and plugins that render alt text as a caption therefore have nothing to show, instead of labelling every picture with its file name.
+Embeds are written the way Obsidian itself writes them — following your **link format** settings (wikilinks or Markdown links, relative or vault-absolute path) — but with the display text removed: `![[Attachments/photo.webp]]`, or `![](./Attachments/photo.webp)`. Themes and plugins that render alt text as a caption therefore have nothing to show, instead of labelling every picture with its file name.
 
 Images inside a cell behave like they do elsewhere in Obsidian: links, embeds and controls added by other plugins (image toolbars, converters, zoom buttons…) receive their own clicks, and right-clicking an image opens its native menu — with whatever other plugins add to it — instead of the table's menu. To select a cell that is completely covered by an image, click its border or reach it with the keyboard.
 

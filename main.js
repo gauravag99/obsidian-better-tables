@@ -1089,18 +1089,32 @@ class TableWidget {
     return this.imageEmbedMarkdown(file);
   }
 
-  /** Markdown for an image file with no alias or alt text. Obsidian's own
-   *  generateMarkdownLink adds a `|display name` alias when the file lives in a
-   *  folder, and themes/plugins that show alt text as a caption then label every
-   *  pasted picture with its file name. */
+  /** Markdown for an image file, in the same shape Obsidian itself pastes:
+   *  `![](./Attachments/photo.webp)` for Markdown links, or a wikilink embed —
+   *  but always without an alias/alt, which caption features would render. */
   imageEmbedMarkdown(file) {
     const app = this.plugin.app;
+    const fm = app.fileManager;
+    let link = "";
+    if (fm && typeof fm.generateMarkdownLink === "function") {
+      try {
+        link = fm.generateMarkdownLink(file, this.ctx.sourcePath || "");
+      } catch {
+        link = "";
+      }
+    }
+    // generateMarkdownLink already applies the vault's link settings (wikilinks
+    // vs Markdown, relative vs vault-absolute path, space encoding), so reuse
+    // its path and drop only the display text it appends.
+    if (link) {
+      const wiki = /^\[\[([\s\S]*)\]\]$/.exec(link);
+      if (wiki) return `![[${wiki[1].split("|")[0]}]]`;
+      const md = /^\[[^\]]*\]\(([\s\S]*)\)$/.exec(link);
+      if (md) return `![](${md[1]})`;
+    }
+    // Older clients without generateMarkdownLink.
     const path = file.path || file.name || "";
-    const markdownLinks =
-      typeof app.vault.getConfig === "function" && app.vault.getConfig("useMarkdownLinks");
-    if (markdownLinks) {
-      // encodeURIComponent per segment: spaces, #, ? and parentheses all break
-      // a markdown link otherwise.
+    if (typeof app.vault.getConfig === "function" && app.vault.getConfig("useMarkdownLinks")) {
       const src = path
         .split("/")
         .map((seg) =>
@@ -1109,18 +1123,7 @@ class TableWidget {
         .join("/");
       return `![](${src})`;
     }
-    // Obsidian's own shortest-path resolver, but without the `|display name`
-    // alias generateMarkdownLink would add.
-    let linkPath = path;
-    const cache = app.metadataCache;
-    if (cache && typeof cache.fileToLinktext === "function") {
-      try {
-        linkPath = cache.fileToLinktext(file, this.ctx.sourcePath || "", false) || path;
-      } catch {
-        linkPath = path;
-      }
-    }
-    return `![[${linkPath}]]`;
+    return `![[${path}]]`;
   }
 
   /** Rendered content that owns its own pointer events and menus: images,
