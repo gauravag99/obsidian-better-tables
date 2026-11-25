@@ -34,6 +34,75 @@ function movePos(i, from, to) {
   return i >= to && i < from ? i + 1 : i;
 }
 
+/** Image types we can store as attachments, keyed by MIME type. */
+const IMAGE_EXT = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/jpg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "image/avif": "avif",
+  "image/bmp": "bmp",
+  "image/svg+xml": "svg"
+};
+
+function extForImage(type) {
+  const t = (type || "").toLowerCase().split(";")[0].trim();
+  return IMAGE_EXT[t] || "png";
+}
+
+/** "Pasted image 20261125201345" — matches Obsidian's own attachment naming. */
+function attachmentStamp() {
+  const moment = window.moment;
+  if (moment && typeof moment === "function") return moment().format("YYYYMMDDHHmmss");
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+/** Decode base64 without atob (it's brand-checked in some environments) and
+ *  tolerant of whitespace and the URL-safe alphabet. */
+function base64ToBytes(text) {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const clean = String(text || "")
+    .replace(/\s+/g, "")
+    .replace(/-/g, "+")
+    .replace(/_/g, "/");
+  const out = new Uint8Array(Math.floor((clean.length * 3) / 4));
+  let buffer = 0;
+  let bits = 0;
+  let at = 0;
+  for (const ch of clean) {
+    if (ch === "=") break;
+    const value = chars.indexOf(ch);
+    if (value === -1) continue;
+    buffer = (buffer << 6) | value;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out[at++] = (buffer >> bits) & 0xff;
+    }
+  }
+  return out.subarray(0, at);
+}
+
+/** Decode a data: URL image into bytes. Returns null for anything else. */
+function dataUrlImage(src) {
+  const m = /^data:([^;,]*)((?:;[^,]*)?),([\s\S]*)$/i.exec(src || "");
+  if (!m) return null;
+  const type = (m[1] || "image/png").toLowerCase();
+  if (!/^image\//.test(type)) return null;
+  const meta = m[2] || "";
+  let bytes;
+  try {
+    if (/;base64/i.test(meta)) bytes = base64ToBytes(m[3]);
+    else bytes = new TextEncoder().encode(decodeURIComponent(m[3]));
+  } catch {
+    return null;
+  }
+  return { bytes: bytes.buffer, type };
+}
+
 function sumArr(a) {
   return a.reduce((s, n) => s + n, 0);
 }
@@ -885,6 +954,216 @@ class TableWidget {
     this.sortMerges();
   }
 
+  // --- pasted images ---
+  /** Save an image from the clipboard into the vault's attachment folder and
+   *  insert an embed at the caret. Cells store markdown text, so the embed
+   *  survives the commit to the file (a pasted <img> did not). */
+  async handleCellPaste(td, r, c, evt) {
+    const dt = evt.clipboardData;
+    if (!dt) return;
+    const files = this.imageFilesFrom(dt);
+    // Images copied from a web page arrive as HTML, not as files.
+    const html = !files.length && dt.getData ? dt.getData("text/html") : "";
+    const srcs = files.length ? [] : this.imageSrcsFromHtml(html);
+    // Plain text (including an existing ![[embed]]) pastes normally.
+    if (!files.length && !srcs.length) return;
+
+    evt.preventDefault();
+    evt.stopPropagation();
+
+    const sel = window.getSelection();
+    const savedRange = sel && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
+    const lines = await this.imageEmbedsFrom(files, srcs);
+    if (!lines || !lines.length) return;
+    const text = lines.join("\n");
+    if (this.editingCell === td) {
+      this.insertTextAtCaret(td, text, savedRange);
+    } else {
+      // The edit ended while the file was being written: keep the image by
+      // appending the embed to the cell instead of dropping it.
+      this.appendToCell(r, c, text);
+    }
+  }
+
+  /** Drop an image file on a cell. Dropping is not editing, so the embed is
+   *  appended to the cell's text and saved; without this the browser (and
+   *  Obsidian) would attach the file and lose the reference. */
+  async handleCellDrop(td, r, c, evt) {
+    const dt = evt.dataTransfer;
+    if (!dt) return;
+    const files = this.imageFilesFrom(dt);
+    const srcs = files.length ? [] : this.imageSrcsFromHtml(dt.getData ? dt.getData("text/html") : "");
+    if (!files.length && !srcs.length) return;
+    evt.preventDefault();
+    evt.stopPropagation();
+    const lines = await this.imageEmbedsFrom(files, srcs);
+    if (!lines || !lines.length) return;
+    const text = lines.join("\n");
+    if (this.editingCell === td) this.insertTextAtCaret(td, text, null);
+    else this.appendToCell(r, c, text);
+  }
+
+  imageFilesFrom(dt) {
+    const files = [];
+    if (dt.files && dt.files.length) {
+      for (const f of Array.from(dt.files)) {
+        if (f && /^image\//i.test(f.type || "")) files.push(f);
+      }
+    }
+    if (!files.length && dt.items && dt.items.length) {
+      for (const item of Array.from(dt.items)) {
+        if (item.kind === "file" && /^image\//i.test(item.type || "")) {
+          const f = item.getAsFile ? item.getAsFile() : null;
+          if (f) files.push(f);
+        }
+      }
+    }
+    return files;
+  }
+
+  /** Save every image and return the embed lines, or null if saving failed. */
+  async imageEmbedsFrom(files, srcs) {
+    const lines = [];
+    try {
+      for (const file of files.slice(0, 20)) lines.push(`!${await this.savePastedImage(file)}`);
+      for (const src of srcs.slice(0, 20)) {
+        if (/^data:/i.test(src)) {
+          // Inline image data: store it as a real attachment, never inline the
+          // whole data URL in the note.
+          const data = dataUrlImage(src);
+          if (data) lines.push(`!${await this.saveImageBytes(data.bytes, data.type)}`);
+        } else if (/^blob:/i.test(src)) {
+          // Some apps hand over a blob: URL for the copied picture.
+          const res = await fetch(src);
+          const type = res.headers.get("content-type") || "image/png";
+          lines.push(`!${await this.saveImageBytes(await res.arrayBuffer(), type)}`);
+        } else {
+          lines.push(`![](${src})`);
+        }
+      }
+    } catch (err) {
+      console.error("Better Tables: could not save the image", err);
+      new Notice("Better Tables: failed to save the image.");
+      return null;
+    }
+    return lines;
+  }
+
+  appendToCell(r, c, text) {
+    const cell = this.cells[r] && this.cells[r][c];
+    this.cells[r][c] = cell ? `${cell}\n${text}` : text;
+    this.dirty = true;
+    this.save();
+  }
+
+  /** src attributes of images in pasted HTML that we can reference directly
+   *  (remote URLs) or decode into a file (data: URLs). */
+  imageSrcsFromHtml(html) {
+    if (!html) return [];
+    try {
+      const doc = this.doc;
+      const view = (doc && doc.defaultView) || window;
+      const Parser = view.DOMParser || (typeof DOMParser !== "undefined" ? DOMParser : null);
+      if (!Parser) return [];
+      const parsed = new Parser().parseFromString(html, "text/html");
+      return Array.from(parsed.querySelectorAll("img"))
+        .map((img) => (img.getAttribute("src") || "").trim())
+        .filter((src) => /^(https?:\/\/|data:image\/|blob:)/i.test(src));
+    } catch {
+      return [];
+    }
+  }
+
+  async savePastedImage(file) {
+    const bytes = await file.arrayBuffer();
+    return this.saveImageBytes(bytes, file.type || "image/png");
+  }
+
+  async saveImageBytes(bytes, type) {
+    const app = this.plugin.app;
+    const name = `Pasted image ${attachmentStamp()}.${extForImage(type)}`;
+    const path = await this.attachmentPath(name);
+    const slash = path.lastIndexOf("/");
+    if (slash > 0) await this.ensureFolder(path.slice(0, slash));
+    const file = await app.vault.createBinary(path, bytes);
+    return this.nativeMarkdownLink(file);
+  }
+
+  /** Where to put an attachment: Obsidian's own resolver when available, so the
+   *  user's attachment folder settings (vault root, note folder, subfolder)
+   *  are respected, with a manual fallback for older clients. */
+  async attachmentPath(name) {
+    const app = this.plugin.app;
+    const fm = app.fileManager;
+    const sourcePath = this.ctx.sourcePath || "";
+    if (fm && typeof fm.getAvailablePathForAttachment === "function") {
+      return await fm.getAvailablePathForAttachment(name, sourcePath);
+    }
+    if (fm && typeof fm.getAvailablePathForAttachments === "function") {
+      const dot = name.lastIndexOf(".");
+      const base = dot > 0 ? name.slice(0, dot) : name;
+      const ext = dot > 0 ? name.slice(dot + 1) : "";
+      const note = app.vault.getAbstractFileByPath(sourcePath) || undefined;
+      return await fm.getAvailablePathForAttachments(base, ext, note);
+    }
+    const configured =
+      typeof app.vault.getConfig === "function" ? app.vault.getConfig("attachmentFolderPath") : "";
+    const dir = String(configured || "")
+      .replace(/^\.\//, "")
+      .replace(/^\/+|\/+$/g, "");
+    const dot = name.lastIndexOf(".");
+    const base = dot > 0 ? name.slice(0, dot) : name;
+    const ext = dot > 0 ? `${name.slice(dot)}` : "";
+    let candidate = name;
+    let n = 1;
+    const full = (file) => (dir ? `${dir}/${file}` : file);
+    while (app.vault.getAbstractFileByPath(full(candidate))) {
+      candidate = `${base} ${n}${ext}`;
+      n++;
+    }
+    return full(candidate);
+  }
+
+  /** Create the attachment subfolder if the settings point at one that doesn't
+   *  exist yet. Best effort: an existing folder (or a race) is fine. */
+  async ensureFolder(path) {
+    const app = this.plugin.app;
+    if (!path || app.vault.getAbstractFileByPath(path)) return;
+    try {
+      await app.vault.createFolder(path);
+    } catch (err) {
+      // Already created (e.g. by a parallel paste) — nothing to do.
+    }
+  }
+
+  /** Insert plain text at the caret without execCommand, so it works with the
+   *  contentEditable cell and leaves the caret after the inserted text. */
+  insertTextAtCaret(td, text, savedRange) {
+    td.focus();
+    const sel = window.getSelection();
+    if (!sel) return;
+    if (savedRange && td.contains(savedRange.startContainer)) {
+      sel.removeAllRanges();
+      sel.addRange(savedRange);
+    }
+    if (!sel.rangeCount || !td.contains(sel.getRangeAt(0).startContainer)) {
+      const atEnd = this.doc.createRange();
+      atEnd.selectNodeContents(td);
+      atEnd.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(atEnd);
+    }
+    const range = sel.getRangeAt(0);
+    range.deleteContents();
+    const node = this.doc.createTextNode(text);
+    range.insertNode(node);
+    range.setStartAfter(node);
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    window.requestAnimationFrame(() => this.layout());
+  }
+
   // --- cell editing ---
   async renderCellMarkdown(td, text) {
     td._btRawText = text;
@@ -945,6 +1224,44 @@ class TableWidget {
       this.refreshInternalLinkSuggest(td);
       window.requestAnimationFrame(() => this.layout());
     });
+    // Pasting an image: the browser would drop an <img> into the contentEditable
+    // cell, and the cell only stores text — so the picture vanished on commit.
+    // Save it to the vault's attachment folder and insert the embed instead.
+    // Capture phase + stopPropagation so Obsidian's own paste handler can't
+    // also attach the image to the note at the editor cursor.
+    td.addEventListener(
+      "paste",
+      (e) => {
+        if (this.editingCell !== td) return;
+        this.handleCellPaste(td, r, c, e);
+      },
+      true
+    );
+    // Dropping an image file has the same problem, and Obsidian's own drop
+    // handler would attach it to the note instead of the cell.
+    td.addEventListener(
+      "dragover",
+      (e) => {
+        if (!e.dataTransfer) return;
+        const types = Array.from(e.dataTransfer.types || []);
+        if (types.includes("Files") || types.some((t) => /image\//i.test(t))) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+        }
+      },
+      true
+    );
+    td.addEventListener(
+      "drop",
+      (e) => {
+        if (!e.dataTransfer) return;
+        const types = Array.from(e.dataTransfer.types || []);
+        const hasImage = types.includes("Files") || types.some((t) => /image\//i.test(t));
+        if (!hasImage) return;
+        this.handleCellDrop(td, r, c, e);
+      },
+      true
+    );
     // Right-click a cell → merge/split plus the column's text alignment
     // (markdown only supports per-column alignment, so that applies to the
     // whole column).

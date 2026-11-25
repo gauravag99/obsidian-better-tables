@@ -10,6 +10,7 @@ If you are frustrated with making tables in your notes, install this. Summon the
 - **Press `Enter` on a selected cell** to start editing it.
 - **Drag across cells** to select a block. Then copy it, or press `Delete` to clear it.
 - **Merge cells.** Select a block of cells and right-click → **Merge cells** (or press `Alt+M`). Right-click a merged cell → **Unmerge cells** (or `Alt+Shift+M`).
+- **Paste a picture into a cell.** It's saved to your attachment folder and embedded; it no longer disappears when you leave the cell.
 - **Drag the lines** between rows and columns to resize them.
 - **Drag the handles** on the top and left edges to reorder rows and columns.
 - **Hover between cells** and click the dot to insert a row or column.
@@ -55,6 +56,16 @@ Markdown has no `colspan`/`rowspan`, so merged cells are stored in that same hid
 - If you type text into a cell that a merge covers (in source mode), that merge is ignored rather than hiding the text; merge again to restore it.
 - Merging, unmerging, inserting/deleting rows and columns, and reordering with the handles all keep the regions valid. A reorder that would tear a merged region apart simply unmerges it.
 - Merged regions can't overlap: merging over an existing merge replaces it.
+
+### Images
+
+A cell holds Markdown text, so a picture pasted straight from the clipboard is written to your **attachment folder** (Obsidian's own attachment settings are respected) and inserted as an embed, e.g. `![[Pasted image 20261125201345.png]]`. That works for screenshots, images copied from another app, and files copied in the file manager.
+
+- Images copied from a web page are inserted as `![](https://…)`.
+- Inline `data:` images are saved as real files, so a huge data URL never ends up in your note.
+- Embeds are limited to the column width, so the table layout stays intact.
+- Plain text, `[[links]]` and existing `![[embeds]]` paste exactly as before.
+- Dropping an image file onto a cell appends it the same way.
 
 ## Settings
 If you like to immediately select & edit text (bypassing having to select the cell first), you can turn on ````Quick text edit```` in the setting.

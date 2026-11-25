@@ -104,6 +104,18 @@
 	white-space: pre-wrap;
 }
 
+/* Images pasted or embedded in a cell must not blow the fixed table layout
+   apart — keep them inside the column. */
+.cp-cell-markdown img,
+.cp-cell-markdown video {
+	max-width: 100%;
+	height: auto;
+}
+
+.cp-cell-markdown .internal-embed img {
+	max-width: 100%;
+}
+
 .better-tables-link-suggest {
 	position: fixed;
 	z-index: var(--layer-popover, 30);
