@@ -116,6 +116,21 @@
 	max-width: 100%;
 }
 
+/* Stick header row: the table gets its own capped scroll box so the first row
+   can stay pinned while the rest scrolls. */
+.cp-table-scroll.is-sticky {
+	max-height: var(--bt-sticky-height, 70vh);
+	overflow-y: auto;
+}
+
+.cp-table.is-sticky-header tr:first-child > td {
+	position: sticky;
+	top: 0;
+	z-index: 3;
+	background: var(--background-secondary);
+	box-shadow: inset 0 -1px 0 var(--background-modifier-border);
+}
+
 /* Hover zoom control on images inside a cell. The frame only wraps plain
    images; Obsidian embeds keep their markup and get the button appended. */
 .cp-img-frame {

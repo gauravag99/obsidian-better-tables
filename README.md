@@ -9,6 +9,10 @@ If you are frustrated with making tables in your notes, install this. Summon the
 - **Move around with the keyboard.** Use the arrow keys, or `Tab` and `Enter`.
 - **Press `Enter` on a selected cell** to start editing it.
 - **Drag across cells** to select a block. Then copy it, or press `Delete` to clear it.
+- **Paste a block of cells.** `Ctrl/Cmd+V` fills the selection from TSV/CSV copied out of Excel, Google Sheets or Numbers, adding rows and columns as needed.
+- **Undo and redo table changes.** `Ctrl/Cmd+Z`, `Ctrl/Cmd+Shift+Z` or `Ctrl+Y` steps through merges, inserts, deletes, pastes, alignment and cell edits.
+- **Export the table** as a CSV or Markdown file, or copy it as CSV/Markdown, from the command palette.
+- **Sticky header row.** Turn it on per table (right-click → *Sticky header row*) and the table scrolls inside a capped box with the first row pinned.
 - **Merge cells.** Select a block of cells and right-click → **Merge cells** (or press `Alt+M`). Right-click a merged cell → **Unmerge cells** (or `Alt+Shift+M`).
 - **Paste a picture into a cell.** It's saved to your attachment folder and embedded; it no longer disappears when you leave the cell. With [Image Converter](https://github.com/xRyul/obsidian-image-converter) installed, pasted images go through its conversion and naming presets first.
 - **Hover an image to zoom it.** A small button appears in the image's corner and opens a full-screen preview you can zoom and pan; the note is never modified.
@@ -36,7 +40,7 @@ Go to the next line, you'd summoned you interactive table.
 
 3. If you have ````slash commander```` core plugin installed, you can use ````/better tables````
 
-Your table is saved as a normal Markdown table, so it still works everywhere else. Column widths and row heights are kept in a small hidden comment inside the block (e.g. `<!-- tk:cols=140,140;rows=48,48 -->`).
+Your table is saved as a normal Markdown table, so it still works everywhere else. Column widths, row heights, merged regions and the sticky-header flag are kept in a small hidden comment inside the block (e.g. `<!-- tk:cols=140,140;rows=48,48;merge=0,0,1,2;sticky=1 -->`).
 
 ### Merged cells
 
@@ -90,6 +94,60 @@ Hovering an image in a cell shows a zoom button in its corner (always visible on
 - the range is 25 %–800 %, and nothing is written to the note — zoom is only for the preview.
 
 The button lives inside the image embed when Obsidian made one, so other image plugins keep their own overlays and CSS intact.
+
+## Undo and redo
+
+Table edits don't go through the note's editor, so Obsidian's own undo doesn't see them. Better Tables keeps a per-table history instead:
+
+- `Ctrl/Cmd+Z` undoes the last table change, `Ctrl/Cmd+Shift+Z` or `Ctrl+Y` redoes it — available while a cell is selected, and from the command palette (*Better Tables: Undo/Redo table change*) at any time.
+- A step covers merges, unmerges, row/column insert and delete, reorders, resizes, pastes, alignment, sticky-header toggles and committed cell text.
+- The selection is restored after each step so repeated `Ctrl+Z` keeps working.
+- Typing inside a cell still uses the normal text undo until you leave the cell.
+- History lives for the session and is dropped if the block was edited outside the table (so undo never restores something unrelated).
+
+## Pasting a block of cells
+
+With a cell selected, `Ctrl/Cmd+V` fills the table from the clipboard:
+
+- TSV (Excel, Google Sheets, Numbers) maps tabs to columns and newlines to rows;
+- a rectangular block of CSV is parsed as CSV, quotes and embedded newlines included;
+- anything else is pasted as a single cell, keeping its line breaks.
+
+The table grows if the block is larger than the space left, the pasted area is selected afterwards, and merged regions under it are dissolved so no text ends up hidden.
+
+## Export
+
+From the command palette:
+
+| Command | Result |
+| --- | --- |
+| *Copy table as CSV* | CSV on the clipboard |
+| *Copy table as Markdown* | GFM table on the clipboard |
+| *Export table as CSV file* | `<note> table <timestamp>.csv` next to the note |
+| *Export table as Markdown file* | `<note> table <timestamp>.md` with a plain Markdown table |
+
+Merged cells export as their top-left value with empty covered cells, the same as the Markdown source.
+
+## Sticky header
+
+Right-click a cell → **Sticky header row** (or the palette command *Toggle sticky header row*). The table then gets its own scroll box, capped at 70 % of the viewport height (`--bt-sticky-height` can override that), and the first row stays pinned while the rest scrolls. The option is stored per table in the metadata comment (`;sticky=1`).
+
+## Commands and shortcuts
+
+Commands (all bindable in *Settings → Hotkeys*) act on the table you last clicked in: insert row above/below, insert column left/right, delete selected rows/columns, merge cells, split cell, undo/redo, sticky header, copy/export.
+
+In-table shortcuts:
+
+| Action | Shortcut |
+| --- | --- |
+| Copy selection | `Ctrl/Cmd+C` |
+| Paste block | `Ctrl/Cmd+V` |
+| Undo / redo | `Ctrl/Cmd+Z` / `Ctrl/Cmd+Shift+Z`, `Ctrl+Y` |
+| Merge cells | `Alt+M` |
+| Unmerge / split | `Alt+Shift+M` |
+| Edit cell | `Enter` or `F2` |
+| Line break in a cell | `Shift+Enter` |
+| Clear selected cells | `Delete` |
 
 Embeds are written the way Obsidian itself writes them — following your **link format** settings (wikilinks or Markdown links, relative or vault-absolute path) — but with the display text removed: `![[Attachments/photo.webp]]`, or `![](./Attachments/photo.webp)`. Themes and plugins that render alt text as a caption therefore have nothing to show, instead of labelling every picture with its file name.
 

@@ -17,10 +17,11 @@ const MIN_W = 50;
 const MIN_H = 28;
 const MAX_LINK_SUGGESTIONS = 20;
 
-/** The metadata comment. Sizes were 0.2.x; merges are appended as one extra
- *  key, so a block written by an older version still parses. merge= entries
- *  are `r,c,rowSpan,colSpan` separated by `|`. */
-const META_RE = /^\s*<!--\s*tk:cols=([\d.,\s]*);rows=([\d.,\s]*)(?:;merge=([\d.,| \t]*))?\s*-->\s*$/;
+/** The metadata comment looks like
+ *    <!-- tk:cols=140,140;rows=48,48;merge=0,0,1,2;sticky=1 -->
+ *  Parse it token by token so keys can be added (or reordered) without
+ *  breaking older blocks. */
+const TK_LINE_RE = /^\s*<!--\s*tk:([\s\S]*?)\s*-->\s*$/;
 
 /** Markdown tables cannot express colspan/rowspan, so merged regions are kept
  *  in the same hidden comment as the sizes. Every other cell of a merged
@@ -104,6 +105,69 @@ function dataUrlImage(src) {
     return null;
   }
   return { bytes: bytes.buffer, type };
+}
+
+/** Parse CSV text (RFC 4180 quoting, embedded newlines). */
+function parseCsvText(text) {
+  const rows = [];
+  let row = [];
+  let field = "";
+  let quoted = false;
+  const src = String(text || "");
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (quoted) {
+      if (ch === '"') {
+        if (src[i + 1] === '"') {
+          field += '"';
+          i++;
+        } else {
+          quoted = false;
+        }
+      } else {
+        field += ch;
+      }
+    } else if (ch === '"') {
+      quoted = true;
+    } else if (ch === ",") {
+      row.push(field);
+      field = "";
+    } else if (ch === "\n") {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = "";
+    } else if (ch !== "\r") {
+      field += ch;
+    }
+  }
+  row.push(field);
+  rows.push(row);
+  return rows;
+}
+
+/** Turn clipboard text into a grid. Spreadsheets put TSV on the clipboard, so
+ *  tabs win; a multi-line block that parses as a rectangular CSV is CSV;
+ *  anything else is one cell (a paragraph keeps its line breaks). */
+function parseClipboardGrid(text) {
+  const norm = String(text || "").replace(/\r\n?/g, "\n").replace(/\n+$/, "");
+  if (!norm) return null;
+  const lines = norm.split("\n");
+  if (lines.some((line) => line.includes("\t"))) {
+    return lines.map((line) => line.split("\t"));
+  }
+  if (lines.length > 1) {
+    const rows = parseCsvText(norm);
+    const width = rows[0] ? rows[0].length : 0;
+    if (width > 1 && rows.every((row) => row.length === width)) return rows;
+  }
+  return [[norm]];
+}
+
+/** One CSV field, quoted only when it has to be. */
+function csvField(value) {
+  const text = String(value == null ? "" : value);
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
 function sumArr(a) {
@@ -233,25 +297,38 @@ function parseAlign(text) {
   return null;
 }
 
-/** Pull stored column/row sizes (and merged regions) out of the metadata
- *  comment, if present. */
+/** Pull stored column/row sizes, merged regions and table options out of the
+ *  metadata comment, if present. */
 function parseMeta(text) {
   for (const line of text.split("\n")) {
-    const m = line.match(META_RE);
-    if (m) {
-      const nums = (s) =>
-        s.split(",").map((n) => Number(n.trim())).filter((n) => Number.isFinite(n) && n > 0);
-      const merges = [];
-      for (const raw of (m[3] || "").split("|")) {
-        const parts = raw.split(",").map((n) => Number(n.trim()));
-        if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) continue;
-        const [r, c, rs, cs] = parts;
-        if (r < 0 || c < 0 || rs < 1 || cs < 1) continue;
-        if (rs === 1 && cs === 1) continue;
-        merges.push({ r, c, rs, cs });
-      }
-      return { cols: nums(m[1]), rows: nums(m[2]), merges };
+    const m = line.match(TK_LINE_RE);
+    if (!m) continue;
+    const tokens = {};
+    for (const part of m[1].split(";")) {
+      const eq = part.indexOf("=");
+      if (eq === -1) continue;
+      tokens[part.slice(0, eq).trim()] = part.slice(eq + 1).trim();
     }
+    const nums = (s) =>
+      String(s || "")
+        .split(",")
+        .map((n) => Number(n.trim()))
+        .filter((n) => Number.isFinite(n) && n > 0);
+    const merges = [];
+    for (const raw of String(tokens.merge || "").split("|")) {
+      const parts = raw.split(",").map((n) => Number(n.trim()));
+      if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) continue;
+      const [r, c, rs, cs] = parts;
+      if (r < 0 || c < 0 || rs < 1 || cs < 1) continue;
+      if (rs === 1 && cs === 1) continue;
+      merges.push({ r, c, rs, cs });
+    }
+    return {
+      cols: nums(tokens.cols),
+      rows: nums(tokens.rows),
+      merges,
+      sticky: tokens.sticky === "1" || tokens.sticky === "true"
+    };
   }
   return null;
 }
@@ -277,6 +354,8 @@ class TableWidget {
     this.merges = [];
     this.mergeAt = [];
     this.tdMap = [];
+    // Header row + internal scrolling with a sticky header (per table).
+    this.sticky = false;
     this.editingCell = null;
     this.editingPos = null;
     this.dirty = false;
@@ -308,6 +387,9 @@ class TableWidget {
     // Full-screen image viewer opened from a cell image (one at a time).
     this.zoomEl = null;
     this.zoomClose = null;
+    // Selection the next write should restore (set by commands that clear the
+    // current selection before saving, e.g. merge or paste).
+    this._pendingSelectionOverride = null;
   }
 
   get doc() {
@@ -318,6 +400,10 @@ class TableWidget {
    *  block (re-render, view close, plugin unload) via the render child below. */
   destroy() {
     this.closeImageZoom();
+    // Re-rendering replaces the widget while a cell selection may still be
+    // active; its document-level key/paste handlers must not outlive it.
+    this.clearCellSelection();
+    this.clearLineSelection();
     if (this.resizeObs) {
       this.resizeObs.disconnect();
       this.resizeObs = null;
@@ -363,6 +449,11 @@ class TableWidget {
     const cols = this.cells[0].length;
     const a = parseAlign(this.source);
     this.colAlign = Array.isArray(a) && a.length === cols ? a : Array(cols).fill(null);
+  }
+
+  loadSticky() {
+    const meta = parseMeta(this.source);
+    this.sticky = !!(meta && meta.sticky);
   }
 
   /** Read the stored merged regions and keep only the ones that still fit the
@@ -472,6 +563,7 @@ class TableWidget {
     this.loadSizes();
     this.loadAlign();
     this.loadMerges();
+    this.loadSticky();
     this.clearLineSelection();
     this.clearCellSelection();
     this.el.empty();
@@ -486,8 +578,10 @@ class TableWidget {
     this.el.toggleClass("cp-table-readonly", this.readOnly);
 
     const scroll = this.el.createDiv({ cls: "cp-table-scroll" });
+    scroll.toggleClass("is-sticky", this.sticky);
     const root = (this.rootEl = scroll.createDiv({ cls: "cp-table-root" }));
     const table = (this.tableEl = root.createEl("table", { cls: "cp-table" }));
+    table.toggleClass("is-sticky-header", this.sticky);
     const colgroup = table.createEl("colgroup");
     for (let c = 0; c < this.cells[0].length; c++) colgroup.createEl("col");
 
@@ -611,7 +705,28 @@ class TableWidget {
     if (this.resizeObs) this.resizeObs.disconnect();
     this.resizeObs = new ResizeObserver(() => this.layout());
     this.resizeObs.observe(this.tableEl);
+    this.restorePendingSelection();
     window.requestAnimationFrame(() => this.layout());
+  }
+
+  /** Re-select the cells the user had before the block was written out and
+   *  re-rendered. Also re-arms the table's document key handler, so Ctrl+Z
+   *  keeps working after an undo. */
+  restorePendingSelection() {
+    const p = this.plugin.pendingSelection;
+    if (!p || p.key !== this.historyKey()) return;
+    this.plugin.pendingSelection = null;
+    if (Date.now() - (p.at || 0) > 6000) return;
+    const rows = this.cells.length;
+    const cols = this.cells[0].length;
+    const clamp = (n, max) => Math.max(0, Math.min(max, Number.isFinite(n) ? n : 0));
+    const r0 = clamp(p.r0, rows - 1);
+    const c0 = clamp(p.c0, cols - 1);
+    const r1 = clamp(p.r1, rows - 1);
+    const c1 = clamp(p.c1, cols - 1);
+    const origin = this.originOf(r0, c0);
+    this.beginCellSelection(origin.r, origin.c);
+    if (r1 !== origin.r || c1 !== origin.c) this.updateCellSelection(r1, c1);
   }
 
   // --- proximity-based chrome visibility ---
@@ -793,6 +908,7 @@ class TableWidget {
   bindResize(div, axis, index) {
     div.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
+      this.plugin.activeWidget = this;
       e.stopPropagation();
       e.preventDefault();
       div.setPointerCapture(e.pointerId);
@@ -863,6 +979,7 @@ class TableWidget {
     this.cells[rA][cA] = parts.join("\n");
     this.merges.push(target);
     this.sortMerges();
+    this._pendingSelectionOverride = { r0: rA, c0: cA, r1: rA, c1: cA };
     this.clearCellSelection();
     this.dirty = true;
     this.save();
@@ -876,6 +993,7 @@ class TableWidget {
     this.flushEdit();
     this.merges = this.merges.filter((x) => x !== m);
     this.sortMerges();
+    this._pendingSelectionOverride = { r0: m.r, c0: m.c, r1: m.r, c1: m.c };
     this.clearCellSelection();
     this.dirty = true;
     this.save();
@@ -1640,6 +1758,7 @@ class TableWidget {
     // focus back out of the cell — which was eating the first Tab/Enter.
     td.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
+      this.plugin.activeWidget = this;
       if ((e.metaKey || e.ctrlKey) && e.target && e.target.closest && e.target.closest("a")) return;
       // Already editing this cell: leave the event alone so native caret
       // placement and drag-to-select-text work.
@@ -1716,6 +1835,7 @@ class TableWidget {
     // whole column). Rendered content — images, embeds, links, plugin controls —
     // keeps its native menu, so other plugins can offer their own actions.
     td.addEventListener("contextmenu", (e) => {
+      this.plugin.activeWidget = this;
       if (this.editingCell) {
         // A cell is being edited → Obsidian shows its native editor menu. Flag
         // the column so the editor-menu hook can append Align to that menu
@@ -1733,19 +1853,19 @@ class TableWidget {
       e.preventDefault();
       e.stopPropagation();
       const menu = new Menu();
+      const inSel = this.cellInSelection(r, c);
+      const bounds = inSel ? this.selRect() : { rA: r, rB: r, cA: c, cB: c };
       // If this cell is part of a drag selection, offer block actions first.
       let cols = [c];
-      if (this.cellInSelection(r, c)) {
+      if (inSel) {
         menu.addItem((i) => i.setTitle("Copy").setIcon("copy").onClick(() => this.copyCellSelection()));
         menu.addItem((i) => i.setTitle("Clear contents").setIcon("eraser").onClick(() => this.clearSelectedCells()));
         const { rA, rB, cA, cB } = this.selRect();
         if (rA !== rB || cA !== cB) {
-          menu.addSeparator();
           menu.addItem((i) =>
             i.setTitle("Merge cells").setIcon("combine").onClick(() => this.mergeSelection())
           );
         }
-        menu.addSeparator();
         // Align every column the selection spans, not just the one clicked.
         cols = [];
         for (let ci = cA; ci <= cB; ci++) cols.push(ci);
@@ -1753,15 +1873,30 @@ class TableWidget {
       // A merged cell offers to split back into its grid cells.
       const merged = this.mergeFor(r, c);
       if (merged && (merged.rs > 1 || merged.cs > 1)) {
-        if (!this.cellInSelection(r, c)) menu.addSeparator();
         menu.addItem((i) =>
           i
             .setTitle(merged.rs > 1 && merged.cs > 1 ? "Split into cells" : "Unmerge cells")
             .setIcon("split")
             .onClick(() => this.unmergeAt(merged.r, merged.c))
         );
-        menu.addSeparator();
       }
+      menu.addSeparator();
+      menu.addItem((i) => i.setTitle("Insert row above").setIcon("plus").onClick(() => this.insertRowAt(bounds.rA)));
+      menu.addItem((i) => i.setTitle("Insert row below").setIcon("plus").onClick(() => this.insertRowAt(bounds.rB + 1)));
+      menu.addItem((i) => i.setTitle("Insert column left").setIcon("plus").onClick(() => this.insertColumnAt(bounds.cA)));
+      menu.addItem((i) => i.setTitle("Insert column right").setIcon("plus").onClick(() => this.insertColumnAt(bounds.cB + 1)));
+      menu.addSeparator();
+      menu.addItem((i) => i.setTitle("Delete row").setIcon("trash-2").onClick(() => this.deleteLineRange("row", bounds.rA, bounds.rB)));
+      menu.addItem((i) => i.setTitle("Delete column").setIcon("trash-2").onClick(() => this.deleteLineRange("col", bounds.cA, bounds.cB)));
+      menu.addSeparator();
+      menu.addItem((i) =>
+        i
+          .setTitle("Sticky header row")
+          .setIcon("pin")
+          .setChecked(this.sticky)
+          .onClick(() => this.toggleSticky())
+      );
+      menu.addSeparator();
       this.addAlignItems(menu, cols);
       menu.showAtMouseEvent(e);
     });
@@ -1871,21 +2006,35 @@ class TableWidget {
   }
 
   beginCellSelection(r0, c0) {
+    this.plugin.activeWidget = this;
     this.cellSel = { r0, c0, r1: r0, c1: c0 };
     this.highlightCellSelection();
     this.cellSelOutside = (ev) => {
       if (!this.rootEl || !this.rootEl.contains(ev.target)) this.clearCellSelection();
     };
     this.doc.addEventListener("pointerdown", this.cellSelOutside, true);
+    // Ctrl/Cmd+V with a cell selected pastes a block of cells (TSV/CSV).
+    this.cellPasteHandler = (ev) => this.onCellBlockPaste(ev);
+    this.doc.addEventListener("paste", this.cellPasteHandler, true);
     this.cellSelKey = (ev) => {
       if (this.isEditing() || !this.cellSel) return;
-      if (ev.key === "Delete" || ev.key === "Backspace") {
+      const mod = ev.metaKey || ev.ctrlKey;
+      if (mod && !ev.altKey && (ev.key === "z" || ev.key === "Z")) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (ev.shiftKey) this.redo();
+        else this.undo();
+      } else if (mod && !ev.altKey && (ev.key === "y" || ev.key === "Y")) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.redo();
+      } else if (ev.key === "Delete" || ev.key === "Backspace") {
         ev.preventDefault();
         ev.stopPropagation();
         this.clearSelectedCells();
       } else if (ev.key === "Escape") {
         this.clearCellSelection();
-      } else if ((ev.metaKey || ev.ctrlKey) && (ev.key === "c" || ev.key === "C")) {
+      } else if (mod && (ev.key === "c" || ev.key === "C")) {
         ev.preventDefault();
         this.copyCellSelection();
       } else if (ev.altKey && (ev.key === "m" || ev.key === "M")) {
@@ -2015,6 +2164,10 @@ class TableWidget {
       this.doc.removeEventListener("keydown", this.cellSelKey, true);
       this.cellSelKey = null;
     }
+    if (this.cellPasteHandler) {
+      this.doc.removeEventListener("paste", this.cellPasteHandler, true);
+      this.cellPasteHandler = null;
+    }
   }
 
   /** Empty every cell in the selection, then persist. */
@@ -2032,6 +2185,7 @@ class TableWidget {
     }
     // Clear first so this widget's doc listeners are removed before save()
     // re-renders the block into a fresh widget.
+    this._pendingSelectionOverride = { r0: rA, c0: cA, r1: rB, c1: cB };
     this.clearCellSelection();
     if (changed) {
       this.dirty = true;
@@ -2503,8 +2657,14 @@ class TableWidget {
     }
     this.renderCellMarkdown(td, this.cells[r][c]);
     if (doSave) {
-      if (this.dirty) this.save();
-      else this.layout();
+      if (this.dirty) {
+        // Re-select the edited cell so the table's Ctrl+Z works after the
+        // re-render (editing cleared the cell selection).
+        this._pendingSelectionOverride = { r0: r, c0: c, r1: r, c1: c };
+        this.save();
+      } else {
+        this.layout();
+      }
     } else {
       this.layout();
     }
@@ -2531,6 +2691,7 @@ class TableWidget {
   bindReorder(handle, axis, index) {
     handle.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
+      this.plugin.activeWidget = this;
       e.stopPropagation();
       e.preventDefault();
       handle.setPointerCapture(e.pointerId);
@@ -2722,14 +2883,12 @@ class TableWidget {
     }
   }
 
-  deleteLine(axis, index) {
+  /** Model-only removal of one row/column, used by the handle button and by
+   *  the range commands. Callers flush/save. */
+  removeLine(axis, index) {
     const rows = this.cells.length;
     const cols = (this.cells[0] && this.cells[0].length) || 0;
-    if ((axis === "row" && rows <= 1) || (axis === "col" && cols <= 1)) {
-      new Notice("Better Tables: a table needs at least one row and column.");
-      return;
-    }
-    this.flushEdit();
+    if ((axis === "row" && rows <= 1) || (axis === "col" && cols <= 1)) return false;
     // Deleting the line a merged cell starts on shouldn't swallow its text:
     // move it to the first cell the region keeps.
     const keep = [];
@@ -2751,8 +2910,204 @@ class TableWidget {
       const cell = this.cells[m.r] && this.cells[m.r][m.c];
       if (cell === "") this.cells[m.r][m.c] = text;
     }
+    return true;
+  }
+
+  deleteLine(axis, index) {
+    const rows = this.cells.length;
+    const cols = (this.cells[0] && this.cells[0].length) || 0;
+    if ((axis === "row" && rows <= 1) || (axis === "col" && cols <= 1)) {
+      new Notice("Better Tables: a table needs at least one row and column.");
+      return;
+    }
+    this.flushEdit();
+    if (!this.removeLine(axis, index)) return;
+    this.clearLineSelection();
+    // Keep a cell selected after the re-render so Ctrl+Z is armed.
+    const at = Math.min(index, axis === "row" ? this.cells.length - 1 : this.cells[0].length - 1);
+    if (axis === "row") this._pendingSelectionOverride = { r0: at, c0: 0, r1: at, c1: 0 };
+    else this._pendingSelectionOverride = { r0: 0, c0: at, r1: 0, c1: at };
+    this.save();
+  }
+
+  /** Insert an empty row at `index` (0-based, appended when >= rows). */
+  insertRowAt(index) {
+    this.flushEdit();
+    const at = Math.max(0, Math.min(this.cells.length, index));
+    this.cells.splice(at, 0, this.cells[0].map(() => ""));
+    this.rowH.splice(at, 0, TABLE_CELL_H);
+    this.mergesAfterInsert("row", at);
+    this._pendingSelectionOverride = { r0: at, c0: 0, r1: at, c1: 0 };
+    this.save();
+    return at;
+  }
+
+  /** Insert an empty column at `index` (0-based, appended when >= cols). */
+  insertColumnAt(index) {
+    this.flushEdit();
+    const at = Math.max(0, Math.min(this.cells[0].length, index));
+    for (const row of this.cells) row.splice(at, 0, "");
+    this.colW.splice(at, 0, TABLE_CELL_W);
+    this.colAlign.splice(at, 0, null);
+    this.mergesAfterInsert("col", at);
+    this._pendingSelectionOverride = { r0: 0, c0: at, r1: 0, c1: at };
+    this.save();
+    return at;
+  }
+
+  /** Current selection as {rA,rB,cA,cB}, or null with a notice. */
+  requireSelection() {
+    if (!this.cellSel) {
+      new Notice("Better Tables: select a cell in the table first.");
+      return null;
+    }
+    return this.selRect();
+  }
+
+  deleteSelectedLines(axis) {
+    const rect = this.requireSelection();
+    if (!rect) return;
+    this.deleteLineRange(axis, axis === "row" ? rect.rA : rect.cA, axis === "row" ? rect.rB : rect.cB);
+  }
+
+  /** Remove a span of rows/columns, always leaving one behind. */
+  deleteLineRange(axis, first, last) {
+    const total = axis === "row" ? this.cells.length : this.cells[0].length;
+    if (total <= 1) {
+      new Notice("Better Tables: a table needs at least one row and column.");
+      return;
+    }
+    this.flushEdit();
+    const start = Math.max(0, Math.min(total - 1, first));
+    const end = Math.max(start, Math.min(total - 1, last));
+    const count = Math.min(end - start + 1, total - 1);
+    for (let i = start + count - 1; i >= start; i--) this.removeLine(axis, i);
+    const at = Math.min(start, axis === "row" ? this.cells.length - 1 : this.cells[0].length - 1);
+    if (axis === "row") this._pendingSelectionOverride = { r0: at, c0: 0, r1: at, c1: 0 };
+    else this._pendingSelectionOverride = { r0: 0, c0: at, r1: 0, c1: at };
+    this.clearCellSelection();
     this.clearLineSelection();
     this.save();
+  }
+
+  /** Sticky header row (the table then scrolls inside a capped box). */
+  toggleSticky() {
+    this.flushEdit();
+    this.sticky = !this.sticky;
+    if (this.tableEl) this.tableEl.toggleClass("is-sticky-header", this.sticky);
+    const scroll = this.el.querySelector(".cp-table-scroll");
+    if (scroll) scroll.toggleClass("is-sticky", this.sticky);
+    this.dirty = true;
+    this.save();
+    new Notice(this.sticky ? "Better Tables: sticky header on." : "Better Tables: sticky header off.");
+  }
+
+  // --- pasting a block of cells ---
+  /** Ctrl/Cmd+V while a cell is selected: fill cells from TSV/CSV text. Text
+   *  being pasted into an input, an editor or a cell being edited is ignored. */
+  onCellBlockPaste(ev) {
+    if (this.isEditing() || !this.cellSel) return;
+    const target = ev.target;
+    if (target && target.closest && target.closest("input, textarea, [contenteditable='true'], .bt-zoom-overlay")) return;
+    const dt = ev.clipboardData;
+    if (!dt) return;
+    if (dt.files && dt.files.length) return; // images have their own path
+    const text = dt.getData ? dt.getData("text/plain") : "";
+    if (!text || !text.trim()) return;
+    const grid = parseClipboardGrid(text);
+    if (!grid) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    this.pasteGrid(grid);
+  }
+
+  /** Paste a grid at the selection's top-left corner, growing the table and
+   *  dissolving any merged regions it would overlap. */
+  pasteGrid(grid) {
+    if (!grid || !grid.length || !this.cellSel) return;
+    const width = Math.max(...grid.map((row) => row.length));
+    if (!width) return;
+    this.finishEditing();
+    const rect = this.selRect();
+    const anchor = this.originOf(rect.rA, rect.cA);
+    while (this.cells[0].length < anchor.c + width) {
+      for (const row of this.cells) row.push("");
+      this.colW.push(TABLE_CELL_W);
+      this.colAlign.push(null);
+    }
+    while (this.cells.length < anchor.r + grid.length) {
+      this.cells.push(this.cells[0].map(() => ""));
+      this.rowH.push(TABLE_CELL_H);
+    }
+    const target = { r: anchor.r, c: anchor.c, rs: grid.length, cs: width };
+    this.merges = this.merges.filter((m) => !rectsOverlap(m, target));
+    grid.forEach((row, r) => {
+      for (let c = 0; c < width; c++) {
+        const value = row[c] == null ? "" : String(row[c]);
+        this.cells[anchor.r + r][anchor.c + c] = value.replace(/\r/g, "");
+      }
+    });
+    this.buildMergeIndex();
+    this._pendingSelectionOverride = {
+      r0: anchor.r,
+      c0: anchor.c,
+      r1: anchor.r + grid.length - 1,
+      c1: anchor.c + width - 1
+    };
+    this.dirty = true;
+    this.save();
+  }
+
+  // --- export ---
+  toCSV() {
+    return this.cells.map((row) => row.map(csvField).join(",")).join("\n");
+  }
+
+  toMarkdownTable() {
+    return mdFromCells(this.cells, this.colAlign);
+  }
+
+  async copyTable(kind) {
+    const text = kind === "csv" ? this.toCSV() : this.toMarkdownTable();
+    try {
+      await navigator.clipboard.writeText(text);
+      new Notice(kind === "csv" ? "Better Tables: table copied as CSV." : "Better Tables: table copied as Markdown.");
+    } catch (err) {
+      console.error("Better Tables: copy failed", err);
+      new Notice("Better Tables: could not copy the table.");
+    }
+  }
+
+  /** Write the table to a new file next to the note. */
+  async exportTable(kind) {
+    const app = this.plugin.app;
+    const sourcePath = this.ctx.sourcePath || "";
+    const noteName = (sourcePath.split("/").pop() || "table").replace(/\.md$/i, "") || "table";
+    const folder = sourcePath.includes("/") ? sourcePath.slice(0, sourcePath.lastIndexOf("/")) : "";
+    const stamp = attachmentStamp().replace(
+      /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/,
+      "$1$2$3-$4$5$6"
+    );
+    const ext = kind === "csv" ? "csv" : "md";
+    const base = `${noteName} table ${stamp}`;
+    let name = `${base}.${ext}`;
+    let path = folder ? `${folder}/${name}` : name;
+    let n = 1;
+    while (app.vault.getAbstractFileByPath(path)) {
+      name = `${base} ${n}.${ext}`;
+      path = folder ? `${folder}/${name}` : name;
+      n++;
+    }
+    const content = kind === "csv" ? this.toCSV() : this.toMarkdownTable();
+    try {
+      const file = await app.vault.create(path, content);
+      new Notice(`Better Tables: exported to ${file.path}`);
+      return file;
+    } catch (err) {
+      console.error("Better Tables: export failed", err);
+      new Notice("Better Tables: could not export the table.");
+      return null;
+    }
   }
 
   /** Remove the entire ```table block (fences included) from the note. */
@@ -2840,7 +3195,7 @@ class TableWidget {
     return g;
   }
 
-  // --- persistence: write the block back into the note file ---
+  // --- persistence, undo history ---
   serialize() {
     const md = mdFromCells(this.cells, this.colAlign);
     let meta = `<!-- tk:cols=${this.colW.join(",")};rows=${this.rowH.join(",")}`;
@@ -2848,29 +3203,80 @@ class TableWidget {
       const regions = this.merges.map((m) => `${m.r},${m.c},${m.rs},${m.cs}`).join("|");
       meta += `;merge=${regions}`;
     }
+    if (this.sticky) meta += ";sticky=1";
     meta += " -->";
     return `${md}\n${meta}`;
   }
 
+  /** Stable identity for a block's undo history: its note plus the line the
+   *  fenced block starts on. Editing rows inside the block doesn't move it. */
+  historyKey(info) {
+    let sec = info;
+    if (sec === undefined) {
+      try {
+        sec = this.ctx.getSectionInfo ? this.ctx.getSectionInfo(this.el) : null;
+      } catch {
+        sec = null;
+      }
+    }
+    const start = sec && Number.isFinite(sec.lineStart) ? sec.lineStart : -1;
+    return `${this.ctx.sourcePath || ""}::${start}`;
+  }
+
+  /** Remember where the user was so the widget re-created after a write can
+   *  restore the selection (which also re-arms the table's key handler). */
+  rememberSelection(rect) {
+    const sel = rect || (this.cellSel ? this.selRect() : null);
+    if (!sel) return;
+    this.plugin.pendingSelection = {
+      key: this.historyKey(),
+      r0: sel.rA !== undefined ? sel.rA : sel.r0,
+      c0: sel.cA !== undefined ? sel.cA : sel.c0,
+      r1: sel.rB !== undefined ? sel.rB : sel.r1,
+      c1: sel.cB !== undefined ? sel.cB : sel.c1,
+      at: Date.now()
+    };
+  }
+
   save() {
     this.dirty = false;
-    const oldBody = this.source;
     const body = this.serialize();
+    // A no-op edit (e.g. aligning left when it already is) shouldn't write the
+    // file, re-render the block, or add an undo step.
+    if (body === this.source) {
+      this._pendingSelectionOverride = null;
+      return;
+    }
+    const override = this._pendingSelectionOverride;
+    this._pendingSelectionOverride = null;
+    this.rememberSelection(override || undefined);
+    let info = null;
+    try {
+      info = this.ctx.getSectionInfo ? this.ctx.getSectionInfo(this.el) : null;
+    } catch {
+      info = null;
+    }
+    this.plugin.pushUndo(this.historyKey(info), this.source, body);
+    this.writeBody(body, info);
+  }
+
+  /** Write a body into the fenced block, without touching the history. */
+  writeBody(body, info) {
+    const oldBody = this.source;
     this.source = body;
     const el = this.el;
     const ctx = this.ctx;
     const plugin = this.plugin;
-    // Capture the block's line range NOW, while the element is still attached.
-    // It can be null right after a block is created (Obsidian hasn't indexed it
-    // yet) — in that case we fall back to locating the block by its content.
-    const info = ctx.getSectionInfo(el);
+    // Capture the block's line range while the element is still attached. It
+    // can be null right after a block is created (Obsidian hasn't indexed it
+    // yet) — then we fall back to locating the block by its content.
+    const sec = info === undefined ? ctx.getSectionInfo(el) : info || ctx.getSectionInfo(el);
     // Persist through a single serialized queue so writes can't interleave and
     // clobber each other's line ranges. Obsidian re-renders the block when the
     // file changes, so we don't render optimistically (which caused a flash).
     plugin.queueWrite(async () => {
       const file = plugin.app.vault.getAbstractFileByPath(ctx.sourcePath);
       if (!file) return;
-      const sec = info || ctx.getSectionInfo(el);
       try {
         await plugin.app.vault.process(file, (data) => {
           // 1) Precise path: replace a validated fenced line range.
@@ -2902,12 +3308,55 @@ class TableWidget {
       }
     });
   }
+
+  /** Step back through this table's edits (merges, inserts, deletes, styling).
+   *  The write triggers a re-render, and the remembered selection is restored
+   *  there, so repeated Ctrl+Z keeps working. */
+  undo() {
+    this.closeImageZoom();
+    this.finishEditing();
+    const key = this.historyKey();
+    const h = this.plugin.historyEntry(key, this.source);
+    if (!h.undo.length) {
+      new Notice("Better Tables: nothing to undo.");
+      return false;
+    }
+    const prev = h.undo.pop();
+    h.redo.push(this.source);
+    h.last = prev;
+    this.rememberSelection();
+    this.writeBody(prev);
+    return true;
+  }
+
+  redo() {
+    this.closeImageZoom();
+    this.finishEditing();
+    const key = this.historyKey();
+    const h = this.plugin.historyEntry(key, this.source);
+    if (!h.redo.length) {
+      new Notice("Better Tables: nothing to redo.");
+      return false;
+    }
+    const next = h.redo.pop();
+    h.undo.push(this.source);
+    h.last = next;
+    this.rememberSelection();
+    this.writeBody(next);
+    return true;
+  }
 }
 
 module.exports = class BetterTablesPlugin extends Plugin {
   async onload() {
     // Serializes all table writes so concurrent saves can never interleave.
     this._writeChain = Promise.resolve();
+    // Per-table undo/redo stacks, keyed by note + block start line.
+    this.tableHistory = new Map();
+    // Selection for the widget created by the next write to restore.
+    this.pendingSelection = null;
+    // Last table the user interacted with, for command-palette actions.
+    this.activeWidget = null;
 
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     this.addSettingTab(new BetterTablesSettingTab(this.app, this));
@@ -2944,6 +3393,55 @@ module.exports = class BetterTablesPlugin extends Plugin {
         editor.replaceSelection(block);
       }
     });
+
+    // Command-palette actions. They operate on the table you last clicked in;
+    // Obsidian lets the user assign hotkeys to any of them.
+    const withTable = (fn) => () => {
+      const widget = this.activeWidget;
+      if (!widget || !widget.el || !widget.el.isConnected) {
+        new Notice("Better Tables: click into a table first.");
+        return;
+      }
+      fn(widget);
+    };
+    const rectThen = (fn) => (widget) => {
+      const rect = widget.requireSelection();
+      if (rect) fn(widget, rect);
+    };
+    const commands = [
+      { id: "undo-change", name: "Undo table change", run: (w) => w.undo() },
+      { id: "redo-change", name: "Redo table change", run: (w) => w.redo() },
+      { id: "insert-row-above", name: "Insert row above", run: rectThen((w, rect) => w.insertRowAt(rect.rA)) },
+      { id: "insert-row-below", name: "Insert row below", run: rectThen((w, rect) => w.insertRowAt(rect.rB + 1)) },
+      { id: "insert-column-left", name: "Insert column left", run: rectThen((w, rect) => w.insertColumnAt(rect.cA)) },
+      { id: "insert-column-right", name: "Insert column right", run: rectThen((w, rect) => w.insertColumnAt(rect.cB + 1)) },
+      { id: "delete-rows", name: "Delete selected rows", run: (w) => w.deleteSelectedLines("row") },
+      { id: "delete-columns", name: "Delete selected columns", run: (w) => w.deleteSelectedLines("col") },
+      {
+        id: "merge-cells",
+        name: "Merge selected cells",
+        run: rectThen((w, rect) => {
+          if (rect.rA !== rect.rB || rect.cA !== rect.cB) w.mergeSelection();
+          else new Notice("Better Tables: select more than one cell to merge.");
+        })
+      },
+      {
+        id: "split-cell",
+        name: "Split merged cell",
+        run: rectThen((w, rect) => {
+          const region = w.mergeFor(rect.rA, rect.cA);
+          if (region) w.unmergeAt(region.r, region.c);
+        })
+      },
+      { id: "toggle-sticky-header", name: "Toggle sticky header row", run: (w) => w.toggleSticky() },
+      { id: "copy-table-csv", name: "Copy table as CSV", run: (w) => w.copyTable("csv") },
+      { id: "copy-table-markdown", name: "Copy table as Markdown", run: (w) => w.copyTable("markdown") },
+      { id: "export-table-csv", name: "Export table as CSV file", run: (w) => w.exportTable("csv") },
+      { id: "export-table-markdown", name: "Export table as Markdown file", run: (w) => w.exportTable("markdown") }
+    ];
+    for (const command of commands) {
+      this.addCommand({ id: command.id, name: command.name, callback: withTable(command.run) });
+    }
   }
 
   async saveSettings() {
@@ -2954,6 +3452,35 @@ module.exports = class BetterTablesPlugin extends Plugin {
   queueWrite(task) {
     this._writeChain = this._writeChain.then(task, task);
     return this._writeChain;
+  }
+
+  /** History for one table block. If the block's body no longer matches what
+   *  we last wrote (edited elsewhere), the old stacks are dropped so undo
+   *  never restores unrelated content. */
+  historyEntry(key, current) {
+    let h = this.tableHistory.get(key);
+    if (!h) {
+      h = { undo: [], redo: [], last: current };
+      this.tableHistory.set(key, h);
+      // Keep the map from growing without bound on long sessions.
+      if (this.tableHistory.size > 200) {
+        const oldest = this.tableHistory.keys().next().value;
+        if (oldest !== key) this.tableHistory.delete(oldest);
+      }
+    } else if (h.last !== current) {
+      h.undo = [];
+      h.redo = [];
+      h.last = current;
+    }
+    return h;
+  }
+
+  pushUndo(key, oldBody, newBody) {
+    const h = this.historyEntry(key, oldBody);
+    if (h.undo[h.undo.length - 1] !== oldBody) h.undo.push(oldBody);
+    while (h.undo.length > 50) h.undo.shift();
+    h.redo = [];
+    h.last = newBody;
   }
 };
 
