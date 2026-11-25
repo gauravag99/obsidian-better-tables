@@ -1407,12 +1407,13 @@ class TableWidget {
   }
 
   /** Rendered content that owns its own pointer events and menus: images,
-   *  embeds, links (menu only) and controls injected by other plugins. Our cell
-   *  handlers step aside so those keep working. */
+   *  links (menu only), and controls injected by other plugins. Embed wrappers
+   *  are deliberately not included: their empty area belongs to the cell, so a
+   *  click next to a picture selects the cell instead of being swallowed. */
   cellContentIsInteractive(target, td, includeLinks) {
     if (!td || !target || target === td || !td.contains(target) || !target.closest) return false;
     const selector =
-      "img, .internal-embed, .image-embed, canvas, video, audio, iframe, " +
+      "img, canvas, video, audio, iframe, " +
       "button, input, select, textarea, .clickable-icon, [role='button'], [contenteditable='true']" +
       (includeLinks ? ", a" : "");
     const el = target.closest(selector);
@@ -1870,6 +1871,16 @@ class TableWidget {
       // range of cells. beginCellPointer resolves it on move/up.
       this.beginCellPointer(td, r, c, e);
     });
+    // Double-clicking the cell (anywhere that isn't an image or another
+    // plugin's control) edits it, even if the selection was lost.
+    td.addEventListener("dblclick", (e) => {
+      if (this.editingCell === td) return;
+      if (this.cellContentIsInteractive(e.target, td)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.clearCellSelection();
+      this.editCell(td, r, c, true);
+    });
     td.addEventListener("input", () => {
       this.refreshInternalLinkSuggest(td);
       window.requestAnimationFrame(() => this.layout());
@@ -2065,6 +2076,15 @@ class TableWidget {
         const sel = window.getSelection();
         sel && sel.removeAllRanges();
         sel && sel.addRange(range);
+      } else if (startTd.firstChild) {
+        // Clicked the empty part of a cell (e.g. beside an image): put the
+        // caret at the end so typing continues the text.
+        const end = this.doc.createRange();
+        end.selectNodeContents(startTd);
+        end.collapse(false);
+        const sel = window.getSelection();
+        sel && sel.removeAllRanges();
+        sel && sel.addRange(end);
       }
     };
     this.doc.addEventListener("mousemove", onMove, true);

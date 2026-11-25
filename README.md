@@ -5,7 +5,7 @@ If you are frustrated with making tables in your notes, install this. Summon the
 
 ## Features
 
-- **Click a cell to select it. Click again to edit.** (Or turn on "Quick text edit" to edit with one click.)
+- **Click a cell to select it. Click again or double-click to edit.** (Or turn on "Quick text edit" to edit with one click.) Clicking a picture or another plugin's controls still belongs to them; the rest of the cell selects and edits normally.
 - **Move around with the keyboard.** Use the arrow keys, or `Tab` and `Enter`.
 - **Press `Enter` on a selected cell** to start editing it.
 - **Drag across cells** to select a block. Then copy it, or press `Delete` to clear it.
